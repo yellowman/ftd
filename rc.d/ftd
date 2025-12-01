@@ -1,0 +1,28 @@
+#!/bin/ksh
+# ftd FastCGI form collector
+#
+daemon="/usr/local/bin/ftd"
+daemon_flags=${ftd_flags:-""}
+pexp="${daemon##*/}"
+
+: ${ftd_envfile:=/etc/ftd.env}
+
+. /etc/rc.d/rc.subr
+
+rc_bg=YES
+rc_reload=NO
+
+load_env() {
+        if [ -f "${ftd_envfile}" ]; then
+                set -a
+                . "${ftd_envfile}"
+                set +a
+        fi
+}
+
+rc_pre() {
+        load_env
+        return 0
+}
+
+rc_cmd $1

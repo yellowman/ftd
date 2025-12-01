@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Submission Dashboard</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · FastCGI Collector</p>
+        <h1>{{if .IsArchived}}Archived Submissions{{else}}Submission Inbox{{end}}</h1>
+        <p class="lede">Review hostile-facing form posts with clear metadata, JSON context, and quick status controls.</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/" class="{{if not .IsArchived}}active{{end}}">Active</a>
+          <a href="{{.AdminPrefix}}/archived" class="{{if .IsArchived}}active{{end}}">Archived</a>
+        </nav>
+        {{if not .IsArchived}}
+        <form method="get" action="{{.AdminPrefix}}/" class="filter">
+          <label>Status
+            <select name="status">
+              <option value="">All</option>
+              <option value="new" {{if eq .Status "new"}}selected{{end}}>New</option>
+              <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+              <option value="complete" {{if eq .Status "complete"}}selected{{end}}>Complete</option>
+            </select>
+          </label>
+          <button type="submit">Apply</button>
+        </form>
+        <form method="post" action="{{.AdminPrefix}}/archive-completed" class="bulk-archive">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit">Archive completed</button>
+        </form>
+        {{end}}
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{if .DefaultPassword}}
+    <div class="alert warning">Default admin password is still active. Change it below.</div>
+    {{end}}
+    {{with .PasswordFlash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Account security</h2>
+        <p>Update the admin password without interrupting active sessions.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/password">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label>Current password
+          <input type="password" name="current_password" required autocomplete="current-password">
+        </label>
+        <label>New password
+          <input type="password" name="new_password" required autocomplete="new-password">
+        </label>
+        <label>Confirm new password
+          <input type="password" name="confirm_password" required autocomplete="new-password">
+        </label>
+        <button type="submit">Save password</button>
+      </form>
+    </section>
+
+    <section class="submissions">
+      {{if not .Submissions}}
+      <p>No submissions found.</p>
+      {{else}}
+      {{range .Submissions}}
+      <div class="card {{.Status}}">
+        <div class="meta">
+          <div class="meta-top">
+            <span class="id-pill">#{{.ID}}</span>
+            <span class="status-pill {{.Status}}">{{.Status}}</span>
+          </div>
+          <div class="meta-bottom">
+            <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
+            <div><strong>IP</strong><span>{{.IP.String}}</span></div>
+            <div><strong>User Agent</strong><span>{{.UserAgent.String}}</span></div>
+            <div><strong>Referer</strong><span>{{.Referer.String}}</span></div>
+            {{if .FilePath.Valid}}
+            <div><strong>Uploaded File</strong><span class="file-ref">{{.FilePath.String}}</span></div>
+            {{end}}
+          </div>
+        </div>
+        {{if .Fields}}
+        <dl class="fields">
+          {{range .Fields}}
+          <div class="field-row">
+            <dt>{{.Key}}</dt>
+            <dd>{{.Value}}</dd>
+          </div>
+          {{end}}
+        </dl>
+        {{end}}
+        <pre class="json">{{.FormPretty}}</pre>
+        <form method="post" class="status-form">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <div class="comment-block {{if eq .Status "archived"}}archived{{end}}">
+            <label>Comment
+              <textarea name="comment" rows="3" {{if eq .Status "archived"}}readonly aria-readonly="true"{{end}}>{{.Comment.String}}</textarea>
+            </label>
+            <p class="hint">Notes for reviewers; archived items show comments in a muted state.</p>
+          </div>
+          <label>Update status
+            <select name="status">
+              <option value="new" {{if eq .Status "new"}}selected{{end}}>New</option>
+              <option value="in_progress" {{if eq .Status "in_progress"}}selected{{end}}>In Progress</option>
+              <option value="complete" {{if eq .Status "complete"}}selected{{end}}>Complete</option>
+              <option value="archived" {{if eq .Status "archived"}}selected{{end}}>Archived</option>
+            </select>
+          </label>
+          <button type="submit">Save</button>
+        </form>
+      </div>
+      {{end}}
+      {{end}}
+    </section>
+
+    <footer class="pagination">
+      {{if gt .Page 1}}
+      <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Status}}&status={{.Status}}{{end}}">Previous</a>
+      {{end}}
+      <span>Page {{.Page}}</span>
+      {{if lt (multiply .Page .PageSize) .Total}}
+      <a href="{{.Path}}?page={{add .Page 1}}{{if .Status}}&status={{.Status}}{{end}}">Next</a>
+      {{end}}
+    </footer>
+  </div>
+</body>
+</html>

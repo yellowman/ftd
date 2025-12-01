@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sample Form Submission</title>
+</head>
+<body>
+  <h1>Send Form Data</h1>
+  <form method="post" action="/form">
+    <label>Name <input type="text" name="name" required></label><br>
+    <label>Email <input type="email" name="email" required></label><br>
+    <label>Favorite Color
+      <select name="color">
+        <option value="red">Red</option>
+        <option value="green">Green</option>
+        <option value="blue">Blue</option>
+      </select>
+    </label><br>
+    <label>Comments<br>
+      <textarea name="comments" rows="4" cols="40"></textarea>
+    </label><br>
+    <button type="submit">Submit</button>
+  </form>
+</body>
+</html>
