@@ -3,6 +3,6 @@
 
 package main
 
-func applyPledgeInitial(useTCP bool) error { return nil }
-func applyPledgePostDB(useTCP bool) error  { return nil }
-func applyPledgeRuntime(useTCP bool) error { return nil }
+func applyPledgeInitial(useTCP bool) error               { return nil }
+func applyPledgePostDB(useTCP bool) error                { return nil }
+func applyPledgeRuntime(useTCP, allowUploads bool) error { return nil }

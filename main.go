@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"mime/multipart"
@@ -36,21 +37,20 @@ import (
 var embeddedFS embed.FS
 
 const (
-	defaultAdminUser         = "admin"
-	defaultAdminPasswordHash = "$2b$12$R3PN9SNYhLYD3ruOZ3qMJ.gnIK8POtoTLbHKni/mc1C.Y9hDpoteu"
-	sessionCookieName        = "admin_session"
-	csrfCookieName           = "csrf_token"
-	loginCSRFCookieName      = "login_csrf"
-	defaultItemsPerPage      = 20
-	ipLimitPerMinute         = 4
-	ipBlockDuration          = 24 * time.Hour
-	burstWindow              = time.Minute
-	globalBlockDuration      = 5 * time.Minute
-	globalDistinctIPs        = 30
-	maxSubmissionBytes       = 64 * 1024
-	maxFormFields            = 200
-	sessionLifetime          = 24 * time.Hour
-	sessionRefreshAfter      = 6 * time.Hour
+	defaultAdminUser    = "admin"
+	sessionCookieName   = "admin_session"
+	csrfCookieName      = "csrf_token"
+	loginCSRFCookieName = "login_csrf"
+	defaultItemsPerPage = 20
+	ipLimitPerMinute    = 4
+	ipBlockDuration     = 24 * time.Hour
+	burstWindow         = time.Minute
+	globalBlockDuration = 5 * time.Minute
+	globalDistinctIPs   = 30
+	maxSubmissionBytes  = 64 * 1024
+	maxFormFields       = 200
+	sessionLifetime     = 24 * time.Hour
+	sessionRefreshAfter = 6 * time.Hour
 )
 
 var allowedStatuses = map[string]struct{}{
@@ -185,6 +185,10 @@ func main() {
 		log.Fatalf("admin verification failed: %v", err)
 	}
 
+	if err := ensureDefaultPasswordReference(db); err != nil {
+		log.Fatalf("default password reference missing: %v", err)
+	}
+
 	if err := applyPledgePostDB(allowUnix); err != nil {
 		log.Fatalf("post-DB pledge failed: %v", err)
 	}
@@ -209,7 +213,8 @@ func main() {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
 	}
 
-	if err := applyPledgeRuntime(allowUnix); err != nil {
+	allowUploads := uploadLimitBytes > 0
+	if err := applyPledgeRuntime(allowUnix, allowUploads); err != nil {
 		log.Fatalf("runtime pledge failed: %v", err)
 	}
 
@@ -278,6 +283,30 @@ func ensureAdminPresent(db *sql.DB) error {
 	return nil
 }
 
+func ensureDefaultPasswordReference(db *sql.DB) error {
+	if _, err := loadDefaultPasswordHash(context.Background(), db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func loadDefaultPasswordHash(ctx context.Context, db *sql.DB) (string, error) {
+	var defaultHash string
+	if err := db.QueryRowContext(ctx, "SELECT value FROM admin_defaults WHERE key='admin_default_password_hash'").Scan(&defaultHash); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("default password reference missing; apply schema.sql to seed admin_defaults")
+		}
+		return "", fmt.Errorf("checking default password reference: %w", err)
+	}
+
+	if strings.TrimSpace(defaultHash) == "" {
+		return "", fmt.Errorf("default password reference empty; apply schema.sql to seed admin_defaults")
+	}
+
+	return defaultHash, nil
+}
+
 func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	var hash string
 	err := s.db.QueryRowContext(ctx, "SELECT password_hash FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&hash)
@@ -286,7 +315,13 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("checking admin password: %w", err)
 	}
-	s.defaultPasswordActive = hash == defaultAdminPasswordHash
+
+	defaultHash, err := loadDefaultPasswordHash(ctx, s.db)
+	if err != nil {
+		return err
+	}
+
+	s.defaultPasswordActive = hash == defaultHash
 	return nil
 }
 
@@ -308,7 +343,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -334,7 +369,11 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	login := s.withAdminHeaders(http.HandlerFunc(s.handleLogin))
 	logout := s.withAdminHeaders(http.HandlerFunc(s.handleLogout))
 	staticPrefix := s.adminPath("/static/")
-	staticHandler := s.withAdminHeaders(http.StripPrefix(staticPrefix, http.FileServer(http.FS(embeddedFS))))
+	staticFS, err := fs.Sub(embeddedFS, "static")
+	if err != nil {
+		return fmt.Errorf("static filesystem: %w", err)
+	}
+	staticHandler := s.withAdminHeaders(http.StripPrefix(staticPrefix, http.FileServer(http.FS(staticFS))))
 	archiveCompleted := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchiveCompleted)))
 	changePassword := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleChangePassword)))
 	archived := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchived)))
