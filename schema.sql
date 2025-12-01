@@ -27,6 +27,15 @@ INSERT INTO admin_users (username, password_hash)
 VALUES ('admin', '$2b$12$R3PN9SNYhLYD3ruOZ3qMJ.gnIK8POtoTLbHKni/mc1C.Y9hDpoteu')
 ON CONFLICT (username) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS admin_defaults (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+INSERT INTO admin_defaults (key, value)
+VALUES ('admin_default_password_hash', '$2b$12$R3PN9SNYhLYD3ruOZ3qMJ.gnIK8POtoTLbHKni/mc1C.Y9hDpoteu')
+ON CONFLICT (key) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS submission_blocks (
     scope TEXT NOT NULL CHECK (scope IN ('ip','global')),
     identifier TEXT NOT NULL,
