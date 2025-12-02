@@ -35,6 +35,12 @@ psql "$DATABASE_URL" -f schema.sql
 
 The schema creates `submissions` (with metadata, optional stored file path, reviewer comment, and JSONB payload), `admin_users` (bcrypt password hashes), and `submission_blocks` (temporary throttling windows). Indexes are added for status filtering and date ordering to keep pagination fast.
 The schema also seeds a default admin account (`admin` / `change-me`); the dashboard will display a red reminder until you change it via the password form.
+If you prefer to rotate the password directly from `psql` instead of using the dashboard, run these single-line commands at the `psql>` prompt to enable `pgcrypto` and set a new bcrypt hash for the admin account:
+
+```
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+UPDATE admin_users SET password_hash = crypt('your-new-password', gen_salt('bf')) WHERE username = 'admin';
+```
 
 ## Running locally
 1. Export the required environment variables (see above).
@@ -44,7 +50,7 @@ The schema also seeds a default admin account (`admin` / `change-me`); the dashb
    ```
 3. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
    Alternatively, start the service with `-tcp 9000` (or another port) and configure your front-end to FastCGI proxy to `127.0.0.1:9000`.
-4. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`).
+4. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect` with an absolute or relative HTTP(S) URL; the handler issues a 303 See Other to that target once the form is stored.
 
 > Note: Building requires downloading `github.com/lib/pq` and `golang.org/x/crypto`. Ensure outbound module downloads are permitted by your environment.
 
@@ -116,7 +122,8 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
        }
    }
    ```
-5. Install the provided `rc.d` helper and supply environment via `/etc/ftd.env`:
+5. Templates and admin static assets are embedded in the binary and served from the bundled data whether or not the process chroots into the `_ftd` home. You do **not** place the `templates/` or `static/` directories on disk; only put the sample HTML forms in your web root if you want to expose them directly.
+6. Install the provided `rc.d` helper and supply environment via `/etc/ftd.env`:
    ```sh
    install -m 755 rc.d/ftd /etc/rc.d/ftd
    cat <<'EOF' > /etc/ftd.env
@@ -124,14 +131,14 @@ DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>"
 # Optional overrides: FASTCGI_SOCKET, FORM_PATH, ADMIN_PREFIX, SESSION_SECRET, MAX_UPLOAD_MB, etc.
 EOF
    ```
-6. Enable and start the services (the daemon opens sockets before chrooting/dropping to `_ftd`):
+7. Enable and start the services (the daemon opens sockets before chrooting/dropping to `_ftd`):
     ```sh
     rcctl enable httpd
     rcctl start httpd
     rcctl enable ftd
     rcctl start ftd
     ```
-7. Log into the dashboard at `/form/admin/` with `admin` / `change-me`, then update the password using the on-page form (a warning remains until you do).
+8. Log into the dashboard at `/form/admin/` with `admin` / `change-me`, then update the password using the on-page form (a warning remains until you do).
 
 ### Linux + nginx (FastCGI over Unix socket)
 1. Install dependencies and create the service account:
@@ -176,9 +183,10 @@ EOF
    sudo nginx -t
    sudo systemctl reload nginx
    ```
-5. Run the FastCGI service (with socket creation before chroot/drop-privilege):
+5. Templates and admin static assets are embedded in the binary and served from the bundled data whether or not the process chroots into the `_ftd` home. You do **not** place `templates/` or `static/` onto the host filesystem; only publish the sample HTML forms if you wish to serve them directly.
+6. Run the FastCGI service (with socket creation before chroot/drop-privilege):
    ```sh
    sudo -u _ftd /usr/local/bin/ftd
    ```
-6. Sign in at `/form/admin/` as `admin` / `change-me` and rotate the password via the dashboard form; the UI warns while the default remains.
+7. Sign in at `/form/admin/` as `admin` / `change-me` and rotate the password via the dashboard form; the UI warns while the default remains.
 

@@ -32,10 +32,13 @@ func applyPledgePostDB(allowUnix bool) error {
 }
 
 // applyPledgeRuntime further narrows capabilities once sockets are created.
-func applyPledgeRuntime(allowUnix bool) error {
+func applyPledgeRuntime(allowUnix, allowUploads bool) error {
 	promises := "stdio inet"
 	if allowUnix {
 		promises += " unix"
+	}
+	if allowUploads {
+		promises += " rpath wpath cpath"
 	}
 	return syscall.Pledge(promises, nil)
 }

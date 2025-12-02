@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/fcgi"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -36,21 +38,21 @@ import (
 var embeddedFS embed.FS
 
 const (
-	defaultAdminUser         = "admin"
-	defaultAdminPasswordHash = "$2b$12$R3PN9SNYhLYD3ruOZ3qMJ.gnIK8POtoTLbHKni/mc1C.Y9hDpoteu"
-	sessionCookieName        = "admin_session"
-	csrfCookieName           = "csrf_token"
-	loginCSRFCookieName      = "login_csrf"
-	defaultItemsPerPage      = 20
-	ipLimitPerMinute         = 4
-	ipBlockDuration          = 24 * time.Hour
-	burstWindow              = time.Minute
-	globalBlockDuration      = 5 * time.Minute
-	globalDistinctIPs        = 30
-	maxSubmissionBytes       = 64 * 1024
-	maxFormFields            = 200
-	sessionLifetime          = 24 * time.Hour
-	sessionRefreshAfter      = 6 * time.Hour
+	defaultAdminUser    = "admin"
+	sessionCookieName   = "admin_session"
+	csrfCookieName      = "csrf_token"
+	loginCSRFCookieName = "login_csrf"
+	defaultItemsPerPage = 20
+	ipLimitPerMinute    = 4
+	ipBlockDuration     = 24 * time.Hour
+	burstWindow         = time.Minute
+	globalBlockDuration = 5 * time.Minute
+	globalDistinctIPs   = 30
+	maxSubmissionBytes  = 64 * 1024
+	maxFormFields       = 200
+	sessionLifetime     = 24 * time.Hour
+	sessionRefreshAfter = 6 * time.Hour
+	redirectFieldName   = "redirect"
 )
 
 var allowedStatuses = map[string]struct{}{
@@ -185,6 +187,10 @@ func main() {
 		log.Fatalf("admin verification failed: %v", err)
 	}
 
+	if err := ensureDefaultPasswordReference(db); err != nil {
+		log.Fatalf("default password reference missing: %v", err)
+	}
+
 	if err := applyPledgePostDB(allowUnix); err != nil {
 		log.Fatalf("post-DB pledge failed: %v", err)
 	}
@@ -209,7 +215,8 @@ func main() {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
 	}
 
-	if err := applyPledgeRuntime(allowUnix); err != nil {
+	allowUploads := uploadLimitBytes > 0
+	if err := applyPledgeRuntime(allowUnix, allowUploads); err != nil {
 		log.Fatalf("runtime pledge failed: %v", err)
 	}
 
@@ -278,6 +285,30 @@ func ensureAdminPresent(db *sql.DB) error {
 	return nil
 }
 
+func ensureDefaultPasswordReference(db *sql.DB) error {
+	if _, err := loadDefaultPasswordHash(context.Background(), db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func loadDefaultPasswordHash(ctx context.Context, db *sql.DB) (string, error) {
+	var defaultHash string
+	if err := db.QueryRowContext(ctx, "SELECT value FROM admin_defaults WHERE key='admin_default_password_hash'").Scan(&defaultHash); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("default password reference missing; apply schema.sql to seed admin_defaults")
+		}
+		return "", fmt.Errorf("checking default password reference: %w", err)
+	}
+
+	if strings.TrimSpace(defaultHash) == "" {
+		return "", fmt.Errorf("default password reference empty; apply schema.sql to seed admin_defaults")
+	}
+
+	return defaultHash, nil
+}
+
 func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	var hash string
 	err := s.db.QueryRowContext(ctx, "SELECT password_hash FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&hash)
@@ -286,7 +317,13 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	} else if err != nil {
 		return fmt.Errorf("checking admin password: %w", err)
 	}
-	s.defaultPasswordActive = hash == defaultAdminPasswordHash
+
+	defaultHash, err := loadDefaultPasswordHash(ctx, s.db)
+	if err != nil {
+		return err
+	}
+
+	s.defaultPasswordActive = hash == defaultHash
 	return nil
 }
 
@@ -308,7 +345,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -334,7 +371,11 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	login := s.withAdminHeaders(http.HandlerFunc(s.handleLogin))
 	logout := s.withAdminHeaders(http.HandlerFunc(s.handleLogout))
 	staticPrefix := s.adminPath("/static/")
-	staticHandler := s.withAdminHeaders(http.StripPrefix(staticPrefix, http.FileServer(http.FS(embeddedFS))))
+	staticFS, err := fs.Sub(embeddedFS, "static")
+	if err != nil {
+		return fmt.Errorf("static filesystem: %w", err)
+	}
+	staticHandler := s.withAdminHeaders(http.StripPrefix(staticPrefix, http.FileServer(http.FS(staticFS))))
 	archiveCompleted := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchiveCompleted)))
 	changePassword := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleChangePassword)))
 	archived := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchived)))
@@ -389,8 +430,9 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 		uploadPresent bool
 	)
 
+	var redirectTo string
 	if strings.Contains(contentType, "multipart/form-data") {
-		payload, savedFile, originalFile, uploadPresent, err = s.parseMultipartForm(r)
+		payload, savedFile, originalFile, uploadPresent, redirectTo, err = s.parseMultipartForm(r)
 		if err != nil {
 			if he, ok := err.(*httpErr); ok {
 				http.Error(w, he.message, he.status)
@@ -405,6 +447,9 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid form", http.StatusBadRequest)
 			return
 		}
+
+		redirectTo = strings.TrimSpace(r.Form.Get(redirectFieldName))
+		r.Form.Del(redirectFieldName)
 
 		if len(r.Form) > maxFormFields {
 			http.Error(w, "too many form fields", http.StatusRequestEntityTooLarge)
@@ -439,6 +484,16 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if redirectTo != "" {
+		target, err := validateRedirectURL(redirectTo)
+		if err != nil {
+			http.Error(w, "invalid redirect", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
+	}
+
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("submission received"))
 }
@@ -455,10 +510,10 @@ func convertForm(values map[string][]string) map[string]interface{} {
 	return result
 }
 
-func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, string, string, bool, error) {
+func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, string, string, bool, string, error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, "", err
 	}
 
 	payload := make(map[string]interface{})
@@ -466,6 +521,7 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 	var savedFile string
 	fileHandled := false
 	originalName := ""
+	redirectTo := ""
 
 	for {
 		part, err := reader.NextPart()
@@ -473,7 +529,7 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 			break
 		}
 		if err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, "", err
 		}
 
 		name := part.FormName()
@@ -484,11 +540,17 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 		fileName := part.FileName()
 		if fileName == "" {
 			if fieldCount >= maxFormFields {
-				return nil, "", "", false, &httpErr{message: "too many form fields", status: http.StatusRequestEntityTooLarge}
+				return nil, "", "", false, "", &httpErr{message: "too many form fields", status: http.StatusRequestEntityTooLarge}
 			}
 			val, err := io.ReadAll(io.LimitReader(part, maxSubmissionBytes))
 			if err != nil {
-				return nil, "", "", false, err
+				return nil, "", "", false, "", err
+			}
+			if name == redirectFieldName {
+				if redirectTo == "" {
+					redirectTo = strings.TrimSpace(string(val))
+				}
+				continue
 			}
 			addTextValue(payload, name, string(val))
 			fieldCount++
@@ -496,7 +558,7 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 		}
 
 		if fileHandled {
-			return nil, "", "", false, &httpErr{message: "only one file upload allowed", status: http.StatusBadRequest}
+			return nil, "", "", false, "", &httpErr{message: "only one file upload allowed", status: http.StatusBadRequest}
 		}
 		originalName = fileName
 
@@ -524,7 +586,20 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 		fileHandled = true
 	}
 
-	return payload, savedFile, originalName, fileHandled, nil
+	return payload, savedFile, originalName, fileHandled, redirectTo, nil
+}
+
+func validateRedirectURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme")
+	}
+
+	return raw, nil
 }
 
 func addTextValue(payload map[string]interface{}, key, val string) {
