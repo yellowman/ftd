@@ -122,7 +122,7 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
        }
    }
    ```
-5. Templates and admin static assets are embedded in the binary and served from the bundled data whether or not the process chroots into the `_ftd` home. You do **not** place the `templates/` or `static/` directories on disk; only put the sample HTML forms in your web root if you want to expose them directly.
+5. Templates and admin static assets are embedded in the binary and served from the `_ftd` chroot (the `_ftd` user home). You do **not** need to copy the `templates/` or `static/` directories to the filesystem; only place the sample HTML forms in your web root if you want to expose them directly.
 6. Install the provided `rc.d` helper and supply environment via `/etc/ftd.env`:
    ```sh
    install -m 755 rc.d/ftd /etc/rc.d/ftd
@@ -183,7 +183,7 @@ EOF
    sudo nginx -t
    sudo systemctl reload nginx
    ```
-5. Templates and admin static assets are embedded in the binary and served from the bundled data whether or not the process chroots into the `_ftd` home. You do **not** place `templates/` or `static/` onto the host filesystem; only publish the sample HTML forms if you wish to serve them directly.
+5. Templates and admin static assets are embedded in the binary and served from the `_ftd` chroot (the `_ftd` user home). There is no need to copy `templates/` or `static/` onto the host filesystem; only publish the sample HTML forms if you wish to serve them directly.
 6. Run the FastCGI service (with socket creation before chroot/drop-privilege):
    ```sh
    sudo -u _ftd /usr/local/bin/ftd
