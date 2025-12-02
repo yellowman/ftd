@@ -122,7 +122,8 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
        }
    }
    ```
-5. Install the provided `rc.d` helper and supply environment via `/etc/ftd.env`:
+5. Templates and admin static assets are embedded in the binary and served from the `_ftd` chroot (the `_ftd` user home). You do **not** need to copy the `templates/` or `static/` directories to the filesystem; only place the sample HTML forms in your web root if you want to expose them directly.
+6. Install the provided `rc.d` helper and supply environment via `/etc/ftd.env`:
    ```sh
    install -m 755 rc.d/ftd /etc/rc.d/ftd
    cat <<'EOF' > /etc/ftd.env
@@ -130,14 +131,14 @@ DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>"
 # Optional overrides: FASTCGI_SOCKET, FORM_PATH, ADMIN_PREFIX, SESSION_SECRET, MAX_UPLOAD_MB, etc.
 EOF
    ```
-6. Enable and start the services (the daemon opens sockets before chrooting/dropping to `_ftd`):
+7. Enable and start the services (the daemon opens sockets before chrooting/dropping to `_ftd`):
     ```sh
     rcctl enable httpd
     rcctl start httpd
     rcctl enable ftd
     rcctl start ftd
     ```
-7. Log into the dashboard at `/form/admin/` with `admin` / `change-me`, then update the password using the on-page form (a warning remains until you do).
+8. Log into the dashboard at `/form/admin/` with `admin` / `change-me`, then update the password using the on-page form (a warning remains until you do).
 
 ### Linux + nginx (FastCGI over Unix socket)
 1. Install dependencies and create the service account:
@@ -182,9 +183,10 @@ EOF
    sudo nginx -t
    sudo systemctl reload nginx
    ```
-5. Run the FastCGI service (with socket creation before chroot/drop-privilege):
+5. Templates and admin static assets are embedded in the binary and served from the `_ftd` chroot (the `_ftd` user home). There is no need to copy `templates/` or `static/` onto the host filesystem; only publish the sample HTML forms if you wish to serve them directly.
+6. Run the FastCGI service (with socket creation before chroot/drop-privilege):
    ```sh
    sudo -u _ftd /usr/local/bin/ftd
    ```
-6. Sign in at `/form/admin/` as `admin` / `change-me` and rotate the password via the dashboard form; the UI warns while the default remains.
+7. Sign in at `/form/admin/` as `admin` / `change-me` and rotate the password via the dashboard form; the UI warns while the default remains.
 
