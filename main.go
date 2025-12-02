@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/fcgi"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -51,6 +52,7 @@ const (
 	maxFormFields       = 200
 	sessionLifetime     = 24 * time.Hour
 	sessionRefreshAfter = 6 * time.Hour
+	redirectFieldName   = "redirect"
 )
 
 var allowedStatuses = map[string]struct{}{
@@ -428,8 +430,9 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 		uploadPresent bool
 	)
 
+	var redirectTo string
 	if strings.Contains(contentType, "multipart/form-data") {
-		payload, savedFile, originalFile, uploadPresent, err = s.parseMultipartForm(r)
+		payload, savedFile, originalFile, uploadPresent, redirectTo, err = s.parseMultipartForm(r)
 		if err != nil {
 			if he, ok := err.(*httpErr); ok {
 				http.Error(w, he.message, he.status)
@@ -444,6 +447,9 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid form", http.StatusBadRequest)
 			return
 		}
+
+		redirectTo = strings.TrimSpace(r.Form.Get(redirectFieldName))
+		r.Form.Del(redirectFieldName)
 
 		if len(r.Form) > maxFormFields {
 			http.Error(w, "too many form fields", http.StatusRequestEntityTooLarge)
@@ -478,6 +484,16 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if redirectTo != "" {
+		target, err := validateRedirectURL(redirectTo)
+		if err != nil {
+			http.Error(w, "invalid redirect", http.StatusBadRequest)
+			return
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
+	}
+
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte("submission received"))
 }
@@ -494,10 +510,10 @@ func convertForm(values map[string][]string) map[string]interface{} {
 	return result
 }
 
-func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, string, string, bool, error) {
+func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, string, string, bool, string, error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return nil, "", "", false, err
+		return nil, "", "", false, "", err
 	}
 
 	payload := make(map[string]interface{})
@@ -505,6 +521,7 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 	var savedFile string
 	fileHandled := false
 	originalName := ""
+	redirectTo := ""
 
 	for {
 		part, err := reader.NextPart()
@@ -512,7 +529,7 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 			break
 		}
 		if err != nil {
-			return nil, "", "", false, err
+			return nil, "", "", false, "", err
 		}
 
 		name := part.FormName()
@@ -523,11 +540,17 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 		fileName := part.FileName()
 		if fileName == "" {
 			if fieldCount >= maxFormFields {
-				return nil, "", "", false, &httpErr{message: "too many form fields", status: http.StatusRequestEntityTooLarge}
+				return nil, "", "", false, "", &httpErr{message: "too many form fields", status: http.StatusRequestEntityTooLarge}
 			}
 			val, err := io.ReadAll(io.LimitReader(part, maxSubmissionBytes))
 			if err != nil {
-				return nil, "", "", false, err
+				return nil, "", "", false, "", err
+			}
+			if name == redirectFieldName {
+				if redirectTo == "" {
+					redirectTo = strings.TrimSpace(string(val))
+				}
+				continue
 			}
 			addTextValue(payload, name, string(val))
 			fieldCount++
@@ -535,7 +558,7 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 		}
 
 		if fileHandled {
-			return nil, "", "", false, &httpErr{message: "only one file upload allowed", status: http.StatusBadRequest}
+			return nil, "", "", false, "", &httpErr{message: "only one file upload allowed", status: http.StatusBadRequest}
 		}
 		originalName = fileName
 
@@ -563,7 +586,20 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 		fileHandled = true
 	}
 
-	return payload, savedFile, originalName, fileHandled, nil
+	return payload, savedFile, originalName, fileHandled, redirectTo, nil
+}
+
+func validateRedirectURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme")
+	}
+
+	return raw, nil
 }
 
 func addTextValue(payload map[string]interface{}, key, val string) {

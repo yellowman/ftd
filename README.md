@@ -50,7 +50,7 @@ UPDATE admin_users SET password_hash = crypt('your-new-password', gen_salt('bf')
    ```
 3. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
    Alternatively, start the service with `-tcp 9000` (or another port) and configure your front-end to FastCGI proxy to `127.0.0.1:9000`.
-4. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`).
+4. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect` with an absolute or relative HTTP(S) URL; the handler issues a 303 See Other to that target once the form is stored.
 
 > Note: Building requires downloading `github.com/lib/pq` and `golang.org/x/crypto`. Ensure outbound module downloads are permitted by your environment.
 
