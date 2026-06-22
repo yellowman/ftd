@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -431,6 +432,7 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	)
 
 	var redirectTo string
+	var err error
 	if strings.Contains(contentType, "multipart/form-data") {
 		payload, savedFile, originalFile, uploadPresent, redirectTo, err = s.parseMultipartForm(r)
 		if err != nil {
@@ -1311,7 +1313,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 }
 
 func formatJSON(raw json.RawMessage) string {
-	var buf strings.Builder
+	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "", "  "); err != nil {
 		return string(raw)
 	}
