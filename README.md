@@ -5,7 +5,7 @@ Yet another form handler. FastCGI Form Collector which turns submissions into to
 ## Features
 - **FastCGI listener** on a Unix domain socket for dynamic form submissions and the admin dashboard (served via the same socket),
   with an optional TCP FastCGI listener via `-tcp <port>`.
-- **PostgreSQL persistence** with JSONB storage for arbitrary form fields and request metadata (IP, user agent, referrer, timestamp).
+- **PostgreSQL persistence** with JSONB storage for arbitrary form fields and request metadata (real source IP, the client-supplied `X-Forwarded-For` header, user agent, referrer, timestamp). Both the trusted peer address and the forwarded header are stored as-is — the forwarded value is attacker-controllable, so treat it accordingly when reviewing.
 - **Admin dashboard** with login (bcrypt passwords stored in the database), pagination, status management (`new`, `in_progress`, `complete`, `archived`), CSRF protection, hardened cookies, and nicely formatted JSON payloads.
 - **Built-in throttling** that blocks abusive IPs (over 4 submissions per minute) for 24 hours and temporarily pauses all submissions for 5 minutes when a burst of distinct IPs appears.
 - **Request caps** to protect the FastCGI endpoint from floods (64KB body and 200-field limit, with an adjustable upload budget on top).
@@ -42,17 +42,37 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 UPDATE admin_users SET password_hash = crypt('your-new-password', gen_salt('bf')) WHERE username = 'admin';
 ```
 
+## Building
+
+This is a standard Go module (Go 1.22+). Before your first build, fetch the
+dependencies and write `go.sum`:
+
+```sh
+go mod tidy
+```
+
+Then build the binary:
+
+```sh
+go build -o /usr/local/bin/ftd
+```
+
+`go mod tidy` downloads `github.com/lib/pq`, `golang.org/x/crypto`, and
+`golang.org/x/sys` (the last is used for OpenBSD `pledge(2)`), so make sure
+outbound module downloads are permitted by your environment. You only need to
+re-run it after changing dependencies; routine rebuilds can call `go build`
+directly.
+
 ## Running locally
 1. Export the required environment variables (see above).
-2. Start the service:
+2. Fetch dependencies (first run only): `go mod tidy`.
+3. Start the service:
    ```sh
    go run .
    ```
-3. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
+4. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
    Alternatively, start the service with `-tcp 9000` (or another port) and configure your front-end to FastCGI proxy to `127.0.0.1:9000`.
-4. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect` with an absolute or relative HTTP(S) URL; the handler issues a 303 See Other to that target once the form is stored.
-
-> Note: Building requires downloading `github.com/lib/pq` and `golang.org/x/crypto`. Ensure outbound module downloads are permitted by your environment.
+5. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect`; the handler issues a 303 See Other to that target once the form is stored. To avoid the endpoint being abused as an open redirect, the target must be either a root-relative path (e.g. `/thank-you`) or an absolute `http(s)` URL whose host matches the request host. Cross-host URLs, protocol-relative URLs (`//host`), and other schemes are rejected with HTTP 400.
 
 ## File uploads
 - Uploads are **disabled by default**. Set `MAX_UPLOAD_MB` to a positive integer to allow a single file upload per submission, capped to that size and counted against the FastCGI body budget.
@@ -81,7 +101,8 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
 - CSRF tokens are required on admin POSTs (login and status updates) and validated against secure cookies.
 - Admin responses set conservative security headers (CSP, frame-ancestors deny, referrer/permissions policies, cache disabling, MIME sniff protection) to reduce injection and clickjacking risk.
 - Submission bodies are capped (64KB) and oversized/overlong forms are rejected to slow data flooding.
-- Terminate TLS at your front-end web server (nginx/httpd) and forward `X-Forwarded-For` so the app can capture real client IPs.
+- Post-submission redirects (`redirect` field) are restricted to the request host or root-relative paths, so the public endpoint cannot be used as an open redirect for phishing.
+- Terminate TLS at your front-end web server (nginx/httpd). The app records the connection peer (`REMOTE_ADDR`, as supplied by the front-end over FastCGI) as the trusted source IP and keys rate limiting on it; if the front-end also forwards an `X-Forwarded-For` header, that client-supplied value is stored verbatim alongside it for reference. The forwarded header is never trusted for rate limiting because it can be spoofed.
 - Restrict filesystem permissions on the FastCGI socket (`FASTCGI_SOCKET`) so only the web server can connect. The socket is created before chroot/drop-privilege when starting as `root`.
 - If the process starts as `root`, it will chroot to the `_ftd` user's home and drop privileges to that account after opening the PostgreSQL socket and FastCGI listener. Create the `_ftd` user and ensure its home directory exists before launching.
 - On OpenBSD, pledge(2) is used: startup allows file/socket setup and DNS, then pledges are tightened after connecting to PostgreSQL and preparing listener sockets (with promises adjusted depending on whether a Unix socket or TCP FastCGI port is used).
@@ -99,11 +120,12 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
    createdb ftd
    psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
+   go mod tidy
    env \
     DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>" \
     go build -o /usr/local/bin/ftd
    ```
-   Other environment variables use the defaults noted in the Configuration table; override them if you need a custom socket path or URL prefixes.
+   `go mod tidy` only needs to run once (or after dependency changes) to fetch modules and write `go.sum`. Other environment variables use the defaults noted in the Configuration table; override them if you need a custom socket path or URL prefixes.
 3. Create the run directory and permissions for httpd:
    ```sh
    install -d -m 750 -o _ftd -g www /var/www/run
@@ -151,11 +173,12 @@ EOF
    createdb ftd
    psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
+   go mod tidy
    env \
     DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>" \
     go build -o /usr/local/bin/ftd
    ```
-   All other environment variables keep their documented defaults unless you override them (e.g., socket path or URL prefixes).
+   `go mod tidy` only needs to run once (or after dependency changes) to fetch modules and write `go.sum`. All other environment variables keep their documented defaults unless you override them (e.g., socket path or URL prefixes).
 3. Prepare the FastCGI socket path for nginx:
    ```sh
    sudo install -d -m 750 -o _ftd -g www-data /var/www/run

@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     id SERIAL PRIMARY KEY,
     submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ip_address TEXT,
+    forwarded_for TEXT,
     user_agent TEXT,
     referer TEXT,
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','in_progress','complete','archived')),

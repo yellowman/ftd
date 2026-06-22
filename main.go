@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -80,17 +81,18 @@ const (
 )
 
 type Submission struct {
-	ID          int64
-	SubmittedAt time.Time
-	IP          sql.NullString
-	UserAgent   sql.NullString
-	Referer     sql.NullString
-	Status      string
-	FilePath    sql.NullString
-	Comment     sql.NullString
-	FormData    json.RawMessage
-	FormPretty  string
-	Fields      []FieldEntry
+	ID           int64
+	SubmittedAt  time.Time
+	IP           sql.NullString
+	ForwardedFor sql.NullString
+	UserAgent    sql.NullString
+	Referer      sql.NullString
+	Status       string
+	FilePath     sql.NullString
+	Comment      sql.NullString
+	FormData     json.RawMessage
+	FormPretty   string
+	Fields       []FieldEntry
 }
 
 type FieldEntry struct {
@@ -405,8 +407,13 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 
-	ip := normalizeIP(clientIP(r))
-	if lim, err := s.enforceRateLimits(r.Context(), ip); err != nil {
+	// Real source IP as seen by the front-end (REMOTE_ADDR over FastCGI). This is
+	// the trustworthy value we key rate limiting on. The X-Forwarded-For header is
+	// client-supplied metadata: it may be legitimate or spoofed, so we record it
+	// verbatim alongside the peer address and leave interpretation to the reader.
+	realIP := normalizeIP(remoteIP(r))
+	forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if lim, err := s.enforceRateLimits(r.Context(), realIP); err != nil {
 		log.Printf("rate limit check error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
@@ -431,6 +438,7 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	)
 
 	var redirectTo string
+	var err error
 	if strings.Contains(contentType, "multipart/form-data") {
 		payload, savedFile, originalFile, uploadPresent, redirectTo, err = s.parseMultipartForm(r)
 		if err != nil {
@@ -475,8 +483,8 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	ref := r.Referer()
 
 	_, err = s.db.Exec(
-		`INSERT INTO submissions (ip_address, user_agent, referer, file_path, form_data) VALUES ($1, $2, $3, $4, $5)`,
-		ip, ua, ref, nullIfEmpty(savedFile), formJSON,
+		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data) VALUES ($1, $2, $3, $4, $5, $6)`,
+		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON,
 	)
 	if err != nil {
 		log.Printf("insert submission error: %v", err)
@@ -485,9 +493,9 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if redirectTo != "" {
-		target, err := validateRedirectURL(redirectTo)
+		target, err := validateRedirectURL(redirectTo, r.Host)
 		if err != nil {
-			http.Error(w, "invalid redirect", http.StatusBadRequest)
+			writeRedirectDeniedPage(w)
 			return
 		}
 		http.Redirect(w, r, target, http.StatusSeeOther)
@@ -589,17 +597,114 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 	return payload, savedFile, originalName, fileHandled, redirectTo, nil
 }
 
-func validateRedirectURL(raw string) (string, error) {
+// validateRedirectURL constrains post-submission redirects to the same host or a
+// root-relative path, preventing the endpoint from being abused as an open
+// redirect. requestHost is the Host of the incoming submission (r.Host).
+func validateRedirectURL(raw, requestHost string) (string, error) {
+	// Backslashes are normalized to forward slashes by some browsers, enabling
+	// open-redirect bypasses such as "/\evil.com"; reject them outright.
+	if strings.ContainsAny(raw, "\\\x00") {
+		return "", fmt.Errorf("invalid redirect")
+	}
+
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
 
-	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
+	switch {
+	case parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https":
 		return "", fmt.Errorf("unsupported scheme")
+	case parsed.Scheme != "" || parsed.Host != "":
+		// Absolute ("https://host/...") or protocol-relative ("//host/...") URLs
+		// must point at the same host that received the submission.
+		if parsed.Host == "" || !strings.EqualFold(parsed.Host, requestHost) {
+			return "", fmt.Errorf("cross-host redirect not allowed")
+		}
+		return raw, nil
+	default:
+		// Relative URL: require a rooted path so the result resolves against the
+		// current host rather than a surprising base.
+		if !strings.HasPrefix(parsed.Path, "/") {
+			return "", fmt.Errorf("relative redirect must be a rooted path")
+		}
+		return raw, nil
 	}
+}
 
-	return raw, nil
+// redirectDeniedPage is served when a submission's redirect target fails
+// validation (cross-host / open-redirect attempt). It is fully self-contained
+// so it renders even with a strict front-end and pulls in no external assets.
+const redirectDeniedPage = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>REDIRECT DENIED</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #000;
+    color: #2bff5a;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    display: flex; align-items: center; justify-content: center;
+    text-shadow: 0 0 6px rgba(43,255,90,0.7);
+    overflow: hidden;
+  }
+  .crt {
+    width: min(720px, 92vw);
+    padding: 28px 32px;
+    border: 1px solid rgba(43,255,90,0.35);
+    box-shadow: 0 0 24px rgba(43,255,90,0.25), inset 0 0 60px rgba(43,255,90,0.06);
+    background:
+      repeating-linear-gradient(0deg, rgba(0,0,0,0) 0 2px, rgba(0,0,0,0.35) 2px 4px);
+  }
+  pre { margin: 0; white-space: pre; font-size: 13px; line-height: 1.2; }
+  .bot { color: #6dffa0; }
+  .err { color: #ff4d4d; text-shadow: 0 0 6px rgba(255,77,77,0.7); }
+  .dim { color: #1f9c3c; }
+  h1 { font-size: 18px; letter-spacing: 3px; margin: 18px 0 6px; }
+  .blink { animation: blink 1s steps(2, start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+  .log { margin-top: 16px; font-size: 13px; }
+  .log div { opacity: 0; animation: type 0.01s forwards; }
+  .log div:nth-child(1){ animation-delay: .2s }
+  .log div:nth-child(2){ animation-delay: .6s }
+  .log div:nth-child(3){ animation-delay: 1.0s }
+  .log div:nth-child(4){ animation-delay: 1.4s }
+  @keyframes type { to { opacity: 1; } }
+</style>
+</head>
+<body>
+  <main class="crt" role="alert">
+    <pre class="bot">      ___________            ___________
+     /  _______  \          /  _______  \
+    |  | <span class="err">x</span>   <span class="err">x</span> |  |        |  | <span class="err">x</span>   <span class="err">x</span> |  |
+    |  |   ___   |  |        |  |   ___   |  |
+    |  |  |___|  |  |        |  |  |___|  |  |
+     \_|_______|_/          \_|_______|_/
+       |  | |  |     [//]      |  | |  |
+      _|__|_|__|_             _|__|_|__|_
+     |__________|           |__________|</pre>
+    <h1 class="err">// REDIRECT DENIED //</h1>
+    <pre class="dim">target failed origin policy &mdash; refusing to forward.</pre>
+    <div class="log">
+      <div>&gt; inspecting redirect target ...</div>
+      <div>&gt; cross-origin / malformed destination detected</div>
+      <div class="err">&gt; ACCESS REFUSED: open-redirect attempt blocked</div>
+      <div class="dim">&gt; your submission was <span class="bot">received and stored</span>. only the redirect was rejected.<span class="blink">_</span></div>
+    </div>
+  </main>
+</body>
+</html>`
+
+func writeRedirectDeniedPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, redirectDeniedPage)
 }
 
 func addTextValue(payload map[string]interface{}, key, val string) {
@@ -662,13 +767,10 @@ func (s *server) saveUploadedFile(part *multipart.Part) (string, error) {
 	return path, nil
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
+// remoteIP returns the connecting peer's address (REMOTE_ADDR as forwarded by the
+// front-end over FastCGI), stripped of any port. This is the real source IP we
+// trust, as opposed to the client-supplied X-Forwarded-For header.
+func remoteIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -1259,7 +1361,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	offset := (page - 1) * pageSize
 
 	args := []interface{}{}
-	query := `SELECT id, submitted_at, ip_address, user_agent, referer, status, file_path, comment, form_data FROM submissions`
+	query := `SELECT id, submitted_at, ip_address, forwarded_for, user_agent, referer, status, file_path, comment, form_data FROM submissions`
 	countQuery := `SELECT COUNT(*) FROM submissions`
 
 	whereClauses := []string{}
@@ -1288,12 +1390,15 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	submissions := []Submission{}
 	for rows.Next() {
 		var sub Submission
-		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData); err != nil {
 			return nil, 0, err
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
 		sub.Fields = extractFields(sub.FormData)
 		submissions = append(submissions, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	var total int
@@ -1311,7 +1416,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 }
 
 func formatJSON(raw json.RawMessage) string {
-	var buf strings.Builder
+	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "", "  "); err != nil {
 		return string(raw)
 	}
@@ -1401,7 +1506,11 @@ func renderTemplate(w http.ResponseWriter, path string, data interface{}) {
 		"multiply": func(a, b int) int { return a * b },
 	}
 
-	tpl, err := template.New("page").Funcs(funcMap).ParseFS(embeddedFS, path)
+	// Name the template after the file's base name so that ParseFS associates the
+	// parsed content with this template (ParseFS names templates by base name).
+	// Otherwise Execute would run an empty template and fail.
+	name := filepath.Base(path)
+	tpl, err := template.New(name).Funcs(funcMap).ParseFS(embeddedFS, path)
 	if err != nil {
 		http.Error(w, "template not found", http.StatusInternalServerError)
 		return

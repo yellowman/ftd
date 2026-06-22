@@ -3,7 +3,7 @@
 
 package main
 
-import "syscall"
+import "golang.org/x/sys/unix"
 
 // applyPledgeInitial sets a permissive pledge needed during startup to open sockets
 // and perform user lookups before dropping privileges. Includes unix promises only
@@ -18,7 +18,7 @@ func applyPledgeInitial(allowUnix bool) error {
 	if allowUnix {
 		promises += " unix"
 	}
-	return syscall.Pledge(promises, nil)
+	return unix.PledgePromises(promises)
 }
 
 // applyPledgePostDB tightens after the PostgreSQL connection has been established
@@ -28,7 +28,7 @@ func applyPledgePostDB(allowUnix bool) error {
 	if allowUnix {
 		promises += " unix"
 	}
-	return syscall.Pledge(promises, nil)
+	return unix.PledgePromises(promises)
 }
 
 // applyPledgeRuntime further narrows capabilities once sockets are created.
@@ -40,5 +40,5 @@ func applyPledgeRuntime(allowUnix, allowUploads bool) error {
 	if allowUploads {
 		promises += " rpath wpath cpath"
 	}
-	return syscall.Pledge(promises, nil)
+	return unix.PledgePromises(promises)
 }
