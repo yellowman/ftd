@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS submissions (
     form_data JSONB NOT NULL
 );
 
+-- Backfill columns on databases created before they were introduced, so that
+-- re-running this script is sufficient to migrate an existing install.
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS forwarded_for TEXT;
+
 CREATE INDEX IF NOT EXISTS submissions_status_submitted_at_idx
     ON submissions (status, submitted_at DESC);
 
