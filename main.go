@@ -487,7 +487,7 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if redirectTo != "" {
-		target, err := validateRedirectURL(redirectTo)
+		target, err := validateRedirectURL(redirectTo, r.Host)
 		if err != nil {
 			http.Error(w, "invalid redirect", http.StatusBadRequest)
 			return
@@ -591,17 +591,39 @@ func (s *server) parseMultipartForm(r *http.Request) (map[string]interface{}, st
 	return payload, savedFile, originalName, fileHandled, redirectTo, nil
 }
 
-func validateRedirectURL(raw string) (string, error) {
+// validateRedirectURL constrains post-submission redirects to the same host or a
+// root-relative path, preventing the endpoint from being abused as an open
+// redirect. requestHost is the Host of the incoming submission (r.Host).
+func validateRedirectURL(raw, requestHost string) (string, error) {
+	// Backslashes are normalized to forward slashes by some browsers, enabling
+	// open-redirect bypasses such as "/\evil.com"; reject them outright.
+	if strings.ContainsAny(raw, "\\\x00") {
+		return "", fmt.Errorf("invalid redirect")
+	}
+
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
 
-	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
+	switch {
+	case parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https":
 		return "", fmt.Errorf("unsupported scheme")
+	case parsed.Scheme != "" || parsed.Host != "":
+		// Absolute ("https://host/...") or protocol-relative ("//host/...") URLs
+		// must point at the same host that received the submission.
+		if parsed.Host == "" || !strings.EqualFold(parsed.Host, requestHost) {
+			return "", fmt.Errorf("cross-host redirect not allowed")
+		}
+		return raw, nil
+	default:
+		// Relative URL: require a rooted path so the result resolves against the
+		// current host rather than a surprising base.
+		if !strings.HasPrefix(parsed.Path, "/") {
+			return "", fmt.Errorf("relative redirect must be a rooted path")
+		}
+		return raw, nil
 	}
-
-	return raw, nil
 }
 
 func addTextValue(payload map[string]interface{}, key, val string) {

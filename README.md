@@ -72,7 +72,7 @@ directly.
    ```
 4. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
    Alternatively, start the service with `-tcp 9000` (or another port) and configure your front-end to FastCGI proxy to `127.0.0.1:9000`.
-5. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect` with an absolute or relative HTTP(S) URL; the handler issues a 303 See Other to that target once the form is stored.
+5. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect`; the handler issues a 303 See Other to that target once the form is stored. To avoid the endpoint being abused as an open redirect, the target must be either a root-relative path (e.g. `/thank-you`) or an absolute `http(s)` URL whose host matches the request host. Cross-host URLs, protocol-relative URLs (`//host`), and other schemes are rejected with HTTP 400.
 
 ## File uploads
 - Uploads are **disabled by default**. Set `MAX_UPLOAD_MB` to a positive integer to allow a single file upload per submission, capped to that size and counted against the FastCGI body budget.
@@ -101,6 +101,7 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
 - CSRF tokens are required on admin POSTs (login and status updates) and validated against secure cookies.
 - Admin responses set conservative security headers (CSP, frame-ancestors deny, referrer/permissions policies, cache disabling, MIME sniff protection) to reduce injection and clickjacking risk.
 - Submission bodies are capped (64KB) and oversized/overlong forms are rejected to slow data flooding.
+- Post-submission redirects (`redirect` field) are restricted to the request host or root-relative paths, so the public endpoint cannot be used as an open redirect for phishing.
 - Terminate TLS at your front-end web server (nginx/httpd) and forward `X-Forwarded-For` so the app can capture real client IPs.
 - Restrict filesystem permissions on the FastCGI socket (`FASTCGI_SOCKET`) so only the web server can connect. The socket is created before chroot/drop-privilege when starting as `root`.
 - If the process starts as `root`, it will chroot to the `_ftd` user's home and drop privileges to that account after opening the PostgreSQL socket and FastCGI listener. Create the `_ftd` user and ensure its home directory exists before launching.
