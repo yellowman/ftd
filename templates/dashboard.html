@@ -79,7 +79,10 @@
           </div>
           <div class="meta-bottom">
             <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
-            <div><strong>IP</strong><span>{{.IP.String}}</span></div>
+            <div><strong>Source IP</strong><span>{{.IP.String}}</span></div>
+            {{if .ForwardedFor.Valid}}
+            <div><strong>X-Forwarded-For</strong><span title="Client-supplied header; may be spoofed">{{.ForwardedFor.String}}</span></div>
+            {{end}}
             <div><strong>User Agent</strong><span>{{.UserAgent.String}}</span></div>
             <div><strong>Referer</strong><span>{{.Referer.String}}</span></div>
             {{if .FilePath.Valid}}
