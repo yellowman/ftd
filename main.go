@@ -1297,6 +1297,9 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 		sub.Fields = extractFields(sub.FormData)
 		submissions = append(submissions, sub)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
 
 	var total int
 	if status == "" {
@@ -1403,7 +1406,11 @@ func renderTemplate(w http.ResponseWriter, path string, data interface{}) {
 		"multiply": func(a, b int) int { return a * b },
 	}
 
-	tpl, err := template.New("page").Funcs(funcMap).ParseFS(embeddedFS, path)
+	// Name the template after the file's base name so that ParseFS associates the
+	// parsed content with this template (ParseFS names templates by base name).
+	// Otherwise Execute would run an empty template and fail.
+	name := filepath.Base(path)
+	tpl, err := template.New(name).Funcs(funcMap).ParseFS(embeddedFS, path)
 	if err != nil {
 		http.Error(w, "template not found", http.StatusInternalServerError)
 		return

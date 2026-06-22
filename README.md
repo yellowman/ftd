@@ -42,17 +42,37 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 UPDATE admin_users SET password_hash = crypt('your-new-password', gen_salt('bf')) WHERE username = 'admin';
 ```
 
+## Building
+
+This is a standard Go module (Go 1.22+). Before your first build, fetch the
+dependencies and write `go.sum`:
+
+```sh
+go mod tidy
+```
+
+Then build the binary:
+
+```sh
+go build -o /usr/local/bin/ftd
+```
+
+`go mod tidy` downloads `github.com/lib/pq`, `golang.org/x/crypto`, and
+`golang.org/x/sys` (the last is used for OpenBSD `pledge(2)`), so make sure
+outbound module downloads are permitted by your environment. You only need to
+re-run it after changing dependencies; routine rebuilds can call `go build`
+directly.
+
 ## Running locally
 1. Export the required environment variables (see above).
-2. Start the service:
+2. Fetch dependencies (first run only): `go mod tidy`.
+3. Start the service:
    ```sh
    go run .
    ```
-3. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
+4. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
    Alternatively, start the service with `-tcp 9000` (or another port) and configure your front-end to FastCGI proxy to `127.0.0.1:9000`.
-4. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect` with an absolute or relative HTTP(S) URL; the handler issues a 303 See Other to that target once the form is stored.
-
-> Note: Building requires downloading `github.com/lib/pq` and `golang.org/x/crypto`. Ensure outbound module downloads are permitted by your environment.
+5. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect` with an absolute or relative HTTP(S) URL; the handler issues a 303 See Other to that target once the form is stored.
 
 ## File uploads
 - Uploads are **disabled by default**. Set `MAX_UPLOAD_MB` to a positive integer to allow a single file upload per submission, capped to that size and counted against the FastCGI body budget.
@@ -99,11 +119,12 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
    createdb ftd
    psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
+   go mod tidy
    env \
     DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>" \
     go build -o /usr/local/bin/ftd
    ```
-   Other environment variables use the defaults noted in the Configuration table; override them if you need a custom socket path or URL prefixes.
+   `go mod tidy` only needs to run once (or after dependency changes) to fetch modules and write `go.sum`. Other environment variables use the defaults noted in the Configuration table; override them if you need a custom socket path or URL prefixes.
 3. Create the run directory and permissions for httpd:
    ```sh
    install -d -m 750 -o _ftd -g www /var/www/run
@@ -151,11 +172,12 @@ EOF
    createdb ftd
    psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
+   go mod tidy
    env \
     DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>" \
     go build -o /usr/local/bin/ftd
    ```
-   All other environment variables keep their documented defaults unless you override them (e.g., socket path or URL prefixes).
+   `go mod tidy` only needs to run once (or after dependency changes) to fetch modules and write `go.sum`. All other environment variables keep their documented defaults unless you override them (e.g., socket path or URL prefixes).
 3. Prepare the FastCGI socket path for nginx:
    ```sh
    sudo install -d -m 750 -o _ftd -g www-data /var/www/run
