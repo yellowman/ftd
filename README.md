@@ -118,7 +118,6 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
 2. Initialize the database schema and admin user (replace credentials as needed):
    ```sh
    createdb ftd
-   psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
    go mod tidy
    env \
@@ -171,7 +170,6 @@ EOF
 2. Initialize the database schema and admin user:
    ```sh
    createdb ftd
-   psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
    go mod tidy
    env \
