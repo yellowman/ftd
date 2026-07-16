@@ -17,7 +17,7 @@ Set the following environment variables before running the server:
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string (e.g., `postgres://user:pass@localhost:5432/forms`). | **Required** |
+| `DATABASE_URL` | PostgreSQL connection string (e.g., `postgres://user:pass@localhost:5432/forms`). Append `?sslmode=disable` for a local server without TLS, or use `sslmode=require`/`verify-full` for remote databases. | **Required** |
 | `FASTCGI_SOCKET` | Unix socket path for the FastCGI listener. | `/var/www/run/ftd.sock` |
 | `FORM_PATH` | FastCGI path for submissions. | `/form` |
 | `ADMIN_PREFIX` | FastCGI path prefix for the admin dashboard (login, dashboard, static). | `/form/admin` |
@@ -35,6 +35,23 @@ psql "$DATABASE_URL" -f schema.sql
 
 The schema creates `submissions` (with metadata, optional stored file path, reviewer comment, and JSONB payload), `admin_users` (bcrypt password hashes), and `submission_blocks` (temporary throttling windows). Indexes are added for status filtering and date ordering to keep pagination fast.
 The schema also seeds a default admin account (`admin` / `change-me`); the dashboard will display a red reminder until you change it via the password form.
+
+### Database role permissions
+The role in `DATABASE_URL` needs read/write access to the tables **and** the `submissions_id_seq` sequence (submission IDs are `SERIAL`). The simplest option is to create the schema as that role so it owns everything:
+
+```sh
+psql -U <appuser> "$DATABASE_URL" -f schema.sql
+```
+
+If the schema was created by a different role (e.g. `postgres`), grant the app role explicitly — otherwise you will see `permission denied for table admin_users` at startup and `permission denied for sequence submissions_id_seq` on the first submission:
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO <appuser>;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO <appuser>;
+-- cover objects created later, too:
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO <appuser>;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO <appuser>;
+```
 If you prefer to rotate the password directly from `psql` instead of using the dashboard, run these single-line commands at the `psql>` prompt to enable `pgcrypto` and set a new bcrypt hash for the admin account:
 
 ```
@@ -105,7 +122,7 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
 - Terminate TLS at your front-end web server (nginx/httpd). The app records the connection peer (`REMOTE_ADDR`, as supplied by the front-end over FastCGI) as the trusted source IP and keys rate limiting on it; if the front-end also forwards an `X-Forwarded-For` header, that client-supplied value is stored verbatim alongside it for reference. The forwarded header is never trusted for rate limiting because it can be spoofed.
 - Restrict filesystem permissions on the FastCGI socket (`FASTCGI_SOCKET`) so only the web server can connect. The socket is created before chroot/drop-privilege when starting as `root`.
 - If the process starts as `root`, it will chroot to the `_ftd` user's home and drop privileges to that account after opening the PostgreSQL socket and FastCGI listener. Create the `_ftd` user and ensure its home directory exists before launching.
-- On OpenBSD, pledge(2) is used: startup allows file/socket setup and DNS, then pledges are tightened after connecting to PostgreSQL and preparing listener sockets (with promises adjusted depending on whether a Unix socket or TCP FastCGI port is used).
+- On OpenBSD, pledge(2) is applied as the final lockdown: the process first opens its sockets, connects to PostgreSQL, and (when started as root) chroots and drops privileges, then pledges down to the minimal promises needed to serve requests (`stdio inet`, plus `unix` for a Unix socket and `rpath wpath cpath` only when uploads are enabled). pledge must come last because `chroot(2)` and the setuid family are not permitted once a process is pledged.
 
 ## Deployment recipes
 
@@ -118,7 +135,6 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
 2. Initialize the database schema and admin user (replace credentials as needed):
    ```sh
    createdb ftd
-   psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
    go mod tidy
    env \
@@ -171,7 +187,6 @@ EOF
 2. Initialize the database schema and admin user:
    ```sh
    createdb ftd
-   psql ftd -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
    psql ftd < schema.sql
    go mod tidy
    env \

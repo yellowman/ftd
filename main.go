@@ -154,10 +154,6 @@ func main() {
 
 	allowUnix := !useTCP || strings.Contains(dbURL, "host=/")
 
-	if err := applyPledgeInitial(allowUnix); err != nil {
-		log.Fatalf("initial pledge failed: %v", err)
-	}
-
 	sessionKey, err := deriveSessionKey()
 	if err != nil {
 		log.Fatalf("failed to derive session key: %v", err)
@@ -193,10 +189,6 @@ func main() {
 		log.Fatalf("default password reference missing: %v", err)
 	}
 
-	if err := applyPledgePostDB(allowUnix); err != nil {
-		log.Fatalf("post-DB pledge failed: %v", err)
-	}
-
 	uploadLimitBytes := uploadLimitMB * 1024 * 1024
 
 	s := &server{
@@ -217,13 +209,18 @@ func main() {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
 	}
 
+	// Chroot and drop privileges while still unpledged: chroot(2) and the setuid
+	// family are not covered by any pledge promise, so they must run before the
+	// sandbox is applied. All privileged setup (sockets, DB connection) is done
+	// by this point.
+	if err := dropPrivilegesIfRoot(); err != nil {
+		log.Fatalf("privilege drop failed: %v", err)
+	}
+
+	// pledge(2) is the final lockdown, applied last and never loosened.
 	allowUploads := uploadLimitBytes > 0
 	if err := applyPledgeRuntime(allowUnix, allowUploads); err != nil {
 		log.Fatalf("runtime pledge failed: %v", err)
-	}
-
-	if err := dropPrivilegesIfRoot(); err != nil {
-		log.Fatalf("privilege drop failed: %v", err)
 	}
 
 	log.Printf("Starting FastCGI listener for submissions and admin on %s", desc)
