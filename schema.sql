@@ -161,6 +161,18 @@ CREATE TABLE IF NOT EXISTS mailing_clicks (
     PRIMARY KEY (recipient_id, link_id)
 );
 
+-- Uploaded images for mailings, stored in the database so no filesystem write
+-- access is needed inside the chroot. Served publicly under TRACK_PATH/img so
+-- recipients' mail clients can fetch them.
+CREATE TABLE IF NOT EXISTS media (
+    id SERIAL PRIMARY KEY,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    data BYTEA NOT NULL,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- One-time migration: convert the old customers.tags comma-string column into
 -- the normalized tables, then drop it. Safe to re-run (the column is gone).
 DO $$ BEGIN

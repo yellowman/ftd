@@ -388,7 +388,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks", "media"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -457,6 +457,8 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/update"), mailingUpdate)
 	mux.Handle(s.adminPath("/mailings/send"), mailingSend)
 	mux.Handle(s.adminPath("/mailings/test"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingTest))))
+	mux.Handle(s.adminPath("/mailings/preview"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingPreview))))
+	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
@@ -465,6 +467,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.HandleFunc(s.trackPath+"/open", s.handleTrackOpen)
 	mux.HandleFunc(s.trackPath+"/c", s.handleTrackClick)
 	mux.HandleFunc(s.trackPath+"/unsub", s.handleTrackUnsub)
+	mux.HandleFunc(s.trackPath+"/img", s.handleMediaServe)
 
 	return fcgi.Serve(l, mux)
 }

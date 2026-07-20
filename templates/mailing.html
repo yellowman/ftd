@@ -34,7 +34,7 @@
     {{end}}
 
     <section class="compose-card">
-      <form method="post" action="{{.AdminPrefix}}/mailings/update">
+      <form method="post" action="{{.AdminPrefix}}/mailings/update" id="compose-form">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <input type="hidden" name="id" value="{{.Mailing.ID}}">
         <label>Subject<input type="text" name="subject" value="{{.Mailing.Subject}}" required></label>
@@ -47,9 +47,28 @@
           </select>
         </label>
         <label>Tags<input type="text" name="tags" value="{{.Mailing.Tags.String}}" placeholder="widgets, sale" title="Customers who click any link in this mailing inherit these tags"></label>
-        <label class="full">Body (HTML)
-          <textarea name="body_html" rows="14" placeholder="&lt;p&gt;Hello!&lt;/p&gt;">{{.Mailing.BodyHTML}}</textarea>
-        </label>
+        <div class="full" id="editor-wrap">
+          <div class="editor-head">
+            <span class="editor-label">Body</span>
+            <button type="button" id="raw-toggle" class="raw-btn" hidden>HTML source</button>
+          </div>
+          <div id="editor-toolbar" class="editor-toolbar" hidden>
+            <button type="button" data-cmd="bold" title="Bold"><b>B</b></button>
+            <button type="button" data-cmd="italic" title="Italic"><i>I</i></button>
+            <button type="button" data-cmd="underline" title="Underline"><u>U</u></button>
+            <button type="button" data-cmd="h2" title="Heading">H2</button>
+            <button type="button" data-cmd="p" title="Paragraph">&para;</button>
+            <button type="button" data-cmd="insertUnorderedList" title="Bullet list">&bull; List</button>
+            <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
+            <button type="button" data-cmd="link" title="Insert link">Link</button>
+            <button type="button" data-cmd="image" title="Insert image by URL">Image</button>
+            <button type="button" data-cmd="cta" title="Insert call-to-action button">CTA</button>
+            <button type="button" data-cmd="insertHorizontalRule" title="Divider">&#8213;</button>
+            <button type="button" data-cmd="removeFormat" title="Clear formatting">Clear</button>
+          </div>
+          <div id="rich-editor" class="rich-editor" contenteditable="true" hidden></div>
+          <textarea name="body_html" id="body-html" rows="14" class="raw-area" placeholder="&lt;p&gt;Hello!&lt;/p&gt;">{{.Mailing.BodyHTML}}</textarea>
+        </div>
         <div class="send-form">
           <button type="submit" name="do" value="save">Save draft</button>
         </div>
@@ -60,10 +79,50 @@
         </div>
         <div class="send-form">
           <button type="submit" name="do" value="send" class="send">Save &amp; send mailing</button>
-          <p class="hint">Saves your edits, then sends to the audience selected above (subscribed, non-bounced customers with an email address). Links are click-tracked and an unsubscribe link and open pixel are appended when configured.</p>
+          <p class="hint">Saves your edits, then sends to the audience selected above (subscribed, non-bounced customers with an email address). Links are click-tracked, a plain-text version is generated automatically for text-only mail clients, and an unsubscribe link and open pixel are appended when configured.</p>
         </div>
       </form>
     </section>
+
+    <section class="password-card">
+      <div>
+        <h2>Images</h2>
+        <p>Upload images (png/jpeg/gif/webp, max 2MB) and insert them into the body. They are served publicly under the tracking path so recipients' mail clients can load them.</p>
+      </div>
+      <div>
+        <form method="post" action="{{.AdminPrefix}}/mailings/media" enctype="multipart/form-data" class="chip-add">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp" required>
+          <button type="submit">Upload</button>
+        </form>
+        {{if .Media}}
+        <div class="media-grid">
+          {{range .Media}}
+          <figure class="media-item">
+            <img src="{{.PublicURL}}" alt="{{.Filename}}" loading="lazy">
+            <figcaption title="{{.Filename}}">{{.Filename}}</figcaption>
+            <div class="media-actions">
+              <button type="button" class="media-insert" data-src="{{.PublicURL}}">Insert</button>
+              <form method="post" action="{{$.AdminPrefix}}/mailings/media" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="media_id" value="{{.ID}}">
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </div>
+          </figure>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
+    </section>
+
+    {{if .Mailing.BodyHTML}}
+    <section class="customers">
+      <h2>Preview <span class="hint-inline">— saved draft, rendered like a mail client; the dashed footer marks where the unsubscribe link and tracking pixel land</span></h2>
+      <iframe src="{{.AdminPrefix}}/mailings/preview?id={{.Mailing.ID}}" class="preview-frame" title="Email preview"></iframe>
+    </section>
+    {{end}}
     {{else}}
     <section class="customers">
       <h2>Delivery — {{.Mailing.Sent}}/{{.Mailing.Total}} sent{{if .Mailing.Failed}}, {{.Mailing.Failed}} failed{{end}}, {{.Mailing.Opened}} opened, {{.Mailing.Clicked}} clicked</h2>
@@ -100,5 +159,6 @@
     {{end}}
     {{end}}
   </div>
+  <script src="{{.AdminPrefix}}/static/editor.js"></script>
 </body>
 </html>

@@ -536,6 +536,134 @@ pre.json {
 
 .tags-cell { font-size: 0.85rem; color: #a5b4fc; }
 
+/* ---------- WYSIWYG editor ---------- */
+
+.editor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+.editor-label {
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.raw-btn {
+  background: rgba(148, 163, 255, 0.1);
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+  box-shadow: none;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.raw-btn:hover { color: var(--text); box-shadow: none; transform: none; }
+
+.editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.4rem;
+  background: rgba(7, 11, 22, 0.8);
+  border: 1px solid var(--line-strong);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.editor-toolbar button {
+  background: rgba(148, 163, 255, 0.08);
+  border: 1px solid var(--line);
+  color: var(--text);
+  box-shadow: none;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.82rem;
+}
+
+.editor-toolbar button:hover {
+  background: rgba(99, 102, 241, 0.25);
+  box-shadow: none;
+  transform: none;
+}
+
+/* The editing surface mimics an email: light background, dark text. */
+.rich-editor {
+  background: #ffffff;
+  color: #1a1a1a;
+  min-height: 280px;
+  padding: 1rem 1.2rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  overflow-y: auto;
+}
+
+.rich-editor:focus { outline: 2px solid var(--accent-a); }
+.rich-editor img { max-width: 100%; }
+.rich-editor a { color: #4f46e5; }
+
+/* Rich mode active: hide the raw textarea unless source view is toggled. */
+#editor-wrap.rich .raw-area { display: none; }
+#editor-wrap.rich.raw .raw-area { display: block; width: 100%; }
+#editor-wrap.rich.raw .rich-editor,
+#editor-wrap.rich.raw .editor-toolbar { display: none; }
+
+/* ---------- media library / preview ---------- */
+
+.media-grid {
+  margin-top: 0.9rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.media-item {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem;
+  background: rgba(7, 11, 22, 0.5);
+}
+
+.media-item img {
+  width: 100%;
+  height: 90px;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 6px;
+}
+
+.media-item figcaption {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0.35rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-actions { display: flex; gap: 0.4rem; }
+
+.media-actions .media-insert {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  box-shadow: none;
+}
+
+.preview-frame {
+  width: 100%;
+  height: 480px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: #e9e9e9;
+}
+
+.hint-inline { font-size: 0.8rem; font-weight: 400; color: var(--muted); }
+
 input[type="file"] {
   padding: 0.4rem;
   border-style: dashed;

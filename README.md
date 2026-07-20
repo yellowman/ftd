@@ -201,9 +201,17 @@ clicked, when, and how often.
 page; the dashboard password form changes the logged-in user's password.
 
 **Lists & mailings** — group customers into lists by email, or bulk-add by tag
-/ recent submitters. Compose an HTML draft, pick a list (or all customers),
+/ recent submitters. Compose in the built-in WYSIWYG editor (bold/lists/
+headings/links/CTA buttons, with an HTML-source toggle for hand editing —
+plain textarea if JavaScript is off), upload images to the media library and
+insert them (stored in Postgres, served publicly under `TRACK_PATH/img` so
+mail clients can fetch them), and check layout in the live preview pane, which
+renders the saved draft in a mail-client-style frame and marks where the
+unsubscribe link and tracking pixel land. Pick a list (or all customers),
 optionally tag the mailing (clickers inherit its tags), test-send it to
-yourself, then send. Mail goes out over the SMTP
+yourself, then send. Messages go out as `multipart/alternative` with an
+auto-generated plain-text version (links become `text (url)`, lists become
+bullets), so text-only mail clients get clean text instead of raw HTML. Mail goes out over the SMTP
 relay in the background; the mailing page shows per-recipient delivery, opens,
 clicks, and per-link click totals. Every message carries an unsubscribe link
 and `List-Unsubscribe` header (when `PUBLIC_BASE_URL` is set); unsubscribed

@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net/http"
 	"net/smtp"
@@ -618,6 +619,17 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Media library for the editor on drafts.
+	media := []Media{}
+	if m.Status == "draft" {
+		media, err = s.listMedia(r.Context())
+		if err != nil {
+			log.Printf("media list error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	// Lists for the recipient selector on drafts.
 	lists := []List{}
 	if m.Status == "draft" {
@@ -649,6 +661,7 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 		"Recipients":      recipients,
 		"Links":           mailingLinks,
 		"Lists":           lists,
+		"Media":           media,
 		"Flash":           mapMailingFlash(r.URL.Query().Get("msg")),
 		"SMTPConfigured":  s.smtpConfigured(),
 		"TrackingEnabled": s.publicBaseURL != "",
@@ -1048,15 +1061,36 @@ func (s *server) runMailingSend(id int64) {
 	log.Printf("mailing %d: finished (%d sent, %d failed)", id, sent, failed)
 }
 
-// buildMessage assembles the RFC 5322 message for one recipient: quoted-printable
-// HTML body with links rewritten through click tracking, an open-tracking pixel,
-// and an unsubscribe footer/header when PUBLIC_BASE_URL is configured. links
-// maps body URL -> mailing_links id; pass nil to skip click rewriting.
+// buildMessage assembles the RFC 5322 message for one recipient as
+// multipart/alternative: an auto-generated text/plain rendition first (for
+// text-only clients), then the quoted-printable HTML with links rewritten
+// through click tracking, an open-tracking pixel, and an unsubscribe
+// footer/header when PUBLIC_BASE_URL is configured. links maps body URL ->
+// mailing_links id; pass nil to skip click rewriting.
 func (s *server) buildMessage(m *Mailing, email, token string, links map[string]int64) []byte {
 	var openURL, unsubURL string
 	if s.publicBaseURL != "" {
 		openURL = s.publicBaseURL + s.trackPath + "/open?t=" + token
 		unsubURL = s.publicBaseURL + s.trackPath + "/unsub?t=" + token
+	}
+
+	htmlBody := m.BodyHTML
+	if s.publicBaseURL != "" && len(links) > 0 {
+		for url, linkID := range links {
+			tracked := s.publicBaseURL + s.trackPath + "/c?t=" + token + "&l=" + strconv.FormatInt(linkID, 10)
+			htmlBody = strings.ReplaceAll(htmlBody, `href="`+url+`"`, `href="`+tracked+`"`)
+		}
+	}
+
+	// The text part mirrors the final HTML (tracked links included, so clicks
+	// from text-mode clients still count) with the unsubscribe URL spelled out.
+	textBody := htmlToText(htmlBody)
+	if unsubURL != "" {
+		textBody += "\r\n\r\n--\r\nUnsubscribe: " + unsubURL
+		htmlBody += "\n<p style=\"font-size:12px;color:#888\"><a href=\"" + unsubURL + "\">Unsubscribe</a></p>"
+	}
+	if openURL != "" {
+		htmlBody += "\n<img src=\"" + openURL + "\" width=\"1\" height=\"1\" alt=\"\">"
 	}
 
 	var buf bytes.Buffer
@@ -1068,27 +1102,27 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 		fmt.Fprintf(&buf, "List-Unsubscribe: <%s>\r\n", unsubURL)
 	}
 	buf.WriteString("MIME-Version: 1.0\r\n")
-	buf.WriteString("Content-Type: text/html; charset=utf-8\r\n")
-	buf.WriteString("Content-Transfer-Encoding: quoted-printable\r\n")
-	buf.WriteString("\r\n")
 
-	body := m.BodyHTML
-	if s.publicBaseURL != "" && len(links) > 0 {
-		for url, linkID := range links {
-			tracked := s.publicBaseURL + s.trackPath + "/c?t=" + token + "&l=" + strconv.FormatInt(linkID, 10)
-			body = strings.ReplaceAll(body, `href="`+url+`"`, `href="`+tracked+`"`)
+	mw := multipart.NewWriter(&buf)
+	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", mw.Boundary())
+
+	writePart := func(ctype, content string) {
+		part, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {ctype + "; charset=utf-8"},
+			"Content-Transfer-Encoding": {"quoted-printable"},
+		})
+		if err != nil {
+			return
 		}
+		qp := quotedprintable.NewWriter(part)
+		_, _ = qp.Write([]byte(content))
+		_ = qp.Close()
 	}
-	if unsubURL != "" {
-		body += "\n<p style=\"font-size:12px;color:#888\"><a href=\"" + unsubURL + "\">Unsubscribe</a></p>"
-	}
-	if openURL != "" {
-		body += "\n<img src=\"" + openURL + "\" width=\"1\" height=\"1\" alt=\"\">"
-	}
+	// Least-preferred alternative first, per RFC 2046.
+	writePart("text/plain", textBody)
+	writePart("text/html", htmlBody)
+	_ = mw.Close()
 
-	qp := quotedprintable.NewWriter(&buf)
-	_, _ = qp.Write([]byte(body))
-	_ = qp.Close()
 	return buf.Bytes()
 }
 
@@ -1902,4 +1936,298 @@ func (s *server) customerClickHistory(ctx context.Context, customerID int64) ([]
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// ---- Media (uploaded images for mailings) ----------------------------------
+
+type Media struct {
+	ID          int64
+	Filename    string
+	ContentType string
+	CreatedBy   sql.NullString
+	CreatedAt   time.Time
+	PublicURL   string
+}
+
+const maxMediaBytes = 2 << 20 // 2MB per image
+
+var allowedMediaTypes = map[string]struct{}{
+	"image/png": {}, "image/jpeg": {}, "image/gif": {}, "image/webp": {},
+}
+
+// mediaURL builds the URL recipients (and the editor) use for an image.
+// Absolute when PUBLIC_BASE_URL is set — required for images in real mail.
+func (s *server) mediaURL(id int64) string {
+	return s.publicBaseURL + s.trackPath + "/img?id=" + strconv.FormatInt(id, 10)
+}
+
+func (s *server) listMedia(ctx context.Context) ([]Media, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, filename, content_type, created_by, created_at FROM media ORDER BY id DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Media{}
+	for rows.Next() {
+		var m Media
+		if err := rows.Scan(&m.ID, &m.Filename, &m.ContentType, &m.CreatedBy, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.PublicURL = s.mediaURL(m.ID)
+		items = append(items, m)
+	}
+	return items, rows.Err()
+}
+
+// handleMediaUpload accepts an image upload (multipart, parsed in memory: the
+// chroot may have no writable filesystem) or deletes one (action=delete).
+func (s *server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	back := s.adminPath("/mailings")
+	if ref := r.Header.Get("Referer"); strings.HasPrefix(ref, s.adminPrefix) {
+		back = ref
+	}
+
+	ctype := r.Header.Get("Content-Type")
+	if !strings.Contains(ctype, "multipart/form-data") {
+		// Simple form post: delete action.
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.FormValue("action") != "delete" {
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			return
+		}
+		id, err := strconv.ParseInt(r.FormValue("media_id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+		if _, err := s.db.ExecContext(r.Context(), `DELETE FROM media WHERE id=$1`, id); err != nil {
+			log.Printf("media delete error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, back, http.StatusSeeOther)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxMediaBytes+64*1024)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "expected multipart upload", http.StatusBadRequest)
+		return
+	}
+
+	var csrfToken, filename string
+	var data []byte
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, "invalid upload", http.StatusBadRequest)
+			return
+		}
+		switch part.FormName() {
+		case "csrf_token":
+			b, _ := io.ReadAll(io.LimitReader(part, 1024))
+			csrfToken = string(b)
+		case "image":
+			filename = part.FileName()
+			b, err := io.ReadAll(io.LimitReader(part, maxMediaBytes+1))
+			if err != nil {
+				http.Error(w, "invalid upload", http.StatusBadRequest)
+				return
+			}
+			if len(b) > maxMediaBytes {
+				http.Error(w, "image too large (max 2MB)", http.StatusRequestEntityTooLarge)
+				return
+			}
+			data = b
+		default:
+			_, _ = io.Copy(io.Discard, part)
+		}
+	}
+
+	if !s.validateCSRFFromCookie(r, csrfCookieName, csrfToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if len(data) == 0 {
+		http.Error(w, "no image uploaded", http.StatusBadRequest)
+		return
+	}
+
+	// Sniff the real content type; never trust the client's.
+	detected := http.DetectContentType(data)
+	if _, ok := allowedMediaTypes[detected]; !ok {
+		http.Error(w, "unsupported image type (png, jpeg, gif, webp)", http.StatusUnsupportedMediaType)
+		return
+	}
+	if filename == "" {
+		filename = "image"
+	}
+	if len(filename) > 200 {
+		filename = filename[:200]
+	}
+
+	user, _ := r.Context().Value(ctxKeyUser).(string)
+	if _, err := s.db.ExecContext(r.Context(),
+		`INSERT INTO media (filename, content_type, data, created_by) VALUES ($1, $2, $3, $4)`,
+		filename, detected, data, user); err != nil {
+		log.Printf("media insert error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, back, http.StatusSeeOther)
+}
+
+// handleMediaServe is the public image endpoint recipients' mail clients hit.
+func (s *server) handleMediaServe(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	var ctype string
+	var data []byte
+	dbErr := s.db.QueryRowContext(r.Context(),
+		`SELECT content_type, data FROM media WHERE id=$1`, id).Scan(&ctype, &data)
+	if dbErr == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if dbErr != nil {
+		log.Printf("media serve error: %v", dbErr)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	_, _ = w.Write(data)
+}
+
+// ---- Preview ---------------------------------------------------------------
+
+const previewShell = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Preview</title>
+<style>
+  body { margin: 0; background: #e9e9e9; font-family: Arial, Helvetica, sans-serif; }
+  .mail { max-width: 600px; margin: 24px auto; background: #ffffff; padding: 24px 28px;
+          border: 1px solid #d4d4d4; color: #1a1a1a; line-height: 1.5; }
+  .mail img { max-width: 100%%; }
+  .footer { margin-top: 28px; padding-top: 12px; border-top: 1px dashed #cccccc;
+            font-size: 12px; color: #888888; }
+</style>
+</head>
+<body>
+  <div class="mail">
+    %s
+    <div class="footer">
+      <p><a href="#">Unsubscribe</a> &larr; the unsubscribe link is appended here on send</p>
+      <p>&#9633; 1&times;1 open-tracking pixel is appended here (invisible in real mail)</p>
+    </div>
+  </div>
+</body>
+</html>`
+
+// handleMailingPreview renders the saved draft body inside a mail-client-like
+// shell (light 600px column) so image placement and layout can be checked
+// before sending. Framed by the compose page, so frame-ancestors is relaxed
+// to same-origin for this response only.
+func (s *server) handleMailingPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	m, err := s.loadMailing(r.Context(), id)
+	if err != nil {
+		log.Printf("preview load error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if m == nil {
+		http.Error(w, "mailing not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src * data:; style-src 'unsafe-inline'; frame-ancestors 'self'")
+	fmt.Fprintf(w, previewShell, m.BodyHTML)
+}
+
+// ---- Plain-text alternative --------------------------------------------------
+
+var (
+	brRe     = regexp.MustCompile(`(?i)<br\s*/?>`)
+	pCloseRe = regexp.MustCompile(`(?i)</(p|div|h[1-6]|li|tr|table|ul|ol|blockquote)>`)
+	liRe     = regexp.MustCompile(`(?i)<li[^>]*>`)
+	aRe      = regexp.MustCompile(`(?is)<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>`)
+	imgRe    = regexp.MustCompile(`(?is)<img[^>]*>`)
+	tagRe    = regexp.MustCompile(`(?s)<[^>]*>`)
+	blankRe  = regexp.MustCompile(`\n{3,}`)
+)
+
+// htmlToText derives a readable text/plain rendition of an HTML body: block
+// boundaries become newlines, list items become bullets, links become
+// "text (url)", images disappear, entities are decoded.
+func htmlToText(html string) string {
+	t := html
+	t = brRe.ReplaceAllString(t, "\n")
+	t = liRe.ReplaceAllString(t, "\n  * ")
+	t = pCloseRe.ReplaceAllString(t, "\n\n")
+	t = aRe.ReplaceAllStringFunc(t, func(m string) string {
+		sub := aRe.FindStringSubmatch(m)
+		text := strings.TrimSpace(tagRe.ReplaceAllString(sub[2], ""))
+		url := sub[1]
+		if text == "" || text == url {
+			return url
+		}
+		return text + " (" + url + ")"
+	})
+	t = imgRe.ReplaceAllString(t, "")
+	t = tagRe.ReplaceAllString(t, "")
+	t = strings.ReplaceAll(t, "\r", "")
+	lines := strings.Split(t, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(strings.TrimLeft(l, " \t"), " \t")
+	}
+	t = strings.Join(lines, "\n")
+	t = blankRe.ReplaceAllString(t, "\n\n")
+	return strings.TrimSpace(unescapeEntities(t))
+}
+
+// unescapeEntities decodes the entities the editor and common bodies produce.
+func unescapeEntities(s string) string {
+	replacements := []struct{ from, to string }{
+		{"&nbsp;", " "}, {"&amp;", "&"}, {"&lt;", "<"}, {"&gt;", ">"},
+		{"&quot;", `"`}, {"&#39;", "'"}, {"&hellip;", "…"}, {"&mdash;", "—"},
+		{"&ndash;", "–"}, {"&bull;", "*"},
+	}
+	for _, r := range replacements {
+		s = strings.ReplaceAll(s, r.from, r.to)
+	}
+	return s
 }
