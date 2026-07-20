@@ -209,9 +209,16 @@ mail clients can fetch them), and check layout in the live preview pane, which
 renders the saved draft in a mail-client-style frame and marks where the
 unsubscribe link and tracking pixel land. Pick a list (or all customers),
 optionally tag the mailing (clickers inherit its tags), test-send it to
-yourself, then send. Messages go out as `multipart/alternative` with an
+yourself, then send. At send time the composed content is wrapped in a
+bulletproof table layout (MSO conditionals, 600px centered presentation
+table, inlined fonts) so it renders correctly in Outlook and friends — the
+preview shows the exact same skeleton. Compose only the content; if you paste
+a full `<html>` document instead, it is sent verbatim as the power-user
+escape hatch. Messages go out as `multipart/alternative` with an
 auto-generated plain-text version (links become `text (url)`, lists become
-bullets), so text-only mail clients get clean text instead of raw HTML. Mail goes out over the SMTP
+bullets), so text-only mail clients get clean text instead of raw HTML.
+Interrupted deliveries (crash/restart mid-send) resume automatically on
+startup; only still-pending recipients are mailed. Mail goes out over the SMTP
 relay in the background; the mailing page shows per-recipient delivery, opens,
 clicks, and per-link click totals. Every message carries an unsubscribe link
 and `List-Unsubscribe` header (when `PUBLIC_BASE_URL` is set); unsubscribed
