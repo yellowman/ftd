@@ -245,6 +245,17 @@ button.send {
 
 .send-form { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 1rem; }
 
+.compose-card .send-form {
+  grid-column: 1 / -1;
+  margin-top: 0.25rem;
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.compose-card .send-form .hint { flex-basis: 100%; margin-top: 0; }
+
 .inline-form { display: inline; }
 
 .bulk-archive button {

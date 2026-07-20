@@ -86,6 +86,18 @@ CREATE TABLE IF NOT EXISTS mailing_recipients (
 
 CREATE INDEX IF NOT EXISTS mailing_recipients_mailing_idx ON mailing_recipients (mailing_id);
 
+-- One row per customer per mailing: guards against duplicate deliveries if a
+-- send is raced or retried. Deduplicates first so upgrades of databases that
+-- predate the constraint succeed.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'mailing_recipients_customer_uidx') THEN
+        DELETE FROM mailing_recipients a USING mailing_recipients b
+            WHERE a.mailing_id = b.mailing_id AND a.customer_id = b.customer_id AND a.id > b.id;
+        CREATE UNIQUE INDEX mailing_recipients_customer_uidx
+            ON mailing_recipients (mailing_id, customer_id);
+    END IF;
+END $$;
+
 -- Click tracking: links extracted from a mailing body at send time. Redirects
 -- are keyed by (recipient token, link id), so no URL travels in the query
 -- string and the endpoint cannot be used as an open redirect.

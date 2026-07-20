@@ -668,7 +668,7 @@ func mapMailingFlash(code string) *passwordFlash {
 	case "nosmtp":
 		return &passwordFlash{Message: "SMTP is not configured. Set SMTP_HOST and MAIL_FROM.", Kind: "error"}
 	case "notdraft":
-		return &passwordFlash{Message: "Only drafts can be edited or sent.", Kind: "error"}
+		return &passwordFlash{Message: "This mailing is not a draft — it may already be sending or sent.", Kind: "error"}
 	case "empty":
 		return &passwordFlash{Message: "Subject and body are required before sending.", Kind: "error"}
 	case "testsent":
@@ -751,7 +751,17 @@ func (s *server) handleMailingUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	http.Redirect(w, r, view+"&msg=saved", http.StatusSeeOther)
+	// The compose page is one form with several submit buttons. Edits are
+	// saved above first, so sending always uses what is on screen — never a
+	// stale audience or body from an earlier save.
+	switch r.FormValue("do") {
+	case "send":
+		s.sendMailingFlow(w, r, id)
+	case "test":
+		s.testSendFlow(w, r, id, r.FormValue("test_email"))
+	default:
+		http.Redirect(w, r, view+"&msg=saved", http.StatusSeeOther)
+	}
 }
 
 func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
@@ -772,6 +782,23 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	s.sendMailingFlow(w, r, id)
+}
+
+// markMailingFailed finalizes a mailing that cannot proceed, so it never shows
+// as "sending" forever. The guard keeps a finished mailing's status intact.
+func (s *server) markMailingFailed(ctx context.Context, id int64) {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE mailings SET status='failed', sent_at=NOW() WHERE id=$1 AND status='sending'`, id); err != nil {
+		log.Printf("mailing %d: failure finalize error: %v", id, err)
+	}
+}
+
+// sendMailingFlow validates, atomically claims the draft, materializes the
+// recipient set, and starts the background delivery worker. The status flip
+// draft->sending is the mutex: concurrent send attempts lose the UPDATE race
+// and are turned away, so an audience can never be enqueued twice.
+func (s *server) sendMailingFlow(w http.ResponseWriter, r *http.Request, id int64) {
 	view := s.adminPath("/mailings/view?id=" + strconv.FormatInt(id, 10))
 
 	if !s.smtpConfigured() {
@@ -798,6 +825,20 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Claim the draft. Exactly one request wins this UPDATE; everyone else
+	// sees notdraft instead of enqueueing a second batch.
+	res, err := s.db.ExecContext(r.Context(),
+		`UPDATE mailings SET status='sending' WHERE id=$1 AND status='draft'`, id)
+	if err != nil {
+		log.Printf("mailing claim error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		http.Redirect(w, r, view+"&msg=notdraft", http.StatusSeeOther)
+		return
+	}
+
 	// Materialize the recipient set: subscribed, non-bounced customers with an
 	// email, from the selected list or (no list) every customer.
 	recipQuery := `SELECT c.id, c.email FROM customers c
@@ -812,6 +853,7 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(), recipQuery, args...)
 	if err != nil {
 		log.Printf("recipient query error: %v", err)
+		s.markMailingFailed(r.Context(), id)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -825,6 +867,7 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 		var rc rcpt
 		if err := rows.Scan(&rc.customerID, &rc.email); err != nil {
 			log.Printf("recipient scan error: %v", err)
+			s.markMailingFailed(r.Context(), id)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
@@ -832,10 +875,16 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("recipient query error: %v", err)
+		s.markMailingFailed(r.Context(), id)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if len(rcpts) == 0 {
+		// Nothing to enqueue: release the claim so the draft stays editable.
+		if _, err := s.db.ExecContext(r.Context(),
+			`UPDATE mailings SET status='draft' WHERE id=$1 AND status='sending'`, id); err != nil {
+			log.Printf("mailing unclaim error: %v", err)
+		}
 		http.Redirect(w, r, view+"&msg=norecipients", http.StatusSeeOther)
 		return
 	}
@@ -844,22 +893,21 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 		token, err := generateRandomHex(16)
 		if err != nil {
 			log.Printf("token error: %v", err)
+			s.markMailingFailed(r.Context(), id)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
+		// The unique (mailing_id, customer_id) index makes retries after a
+		// partial failure safe: existing rows are kept, not duplicated.
 		if _, err := s.db.ExecContext(r.Context(),
-			`INSERT INTO mailing_recipients (mailing_id, customer_id, email, token) VALUES ($1, $2, $3, $4)`,
+			`INSERT INTO mailing_recipients (mailing_id, customer_id, email, token) VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (mailing_id, customer_id) DO NOTHING`,
 			id, rc.customerID, rc.email, token); err != nil {
 			log.Printf("recipient insert error: %v", err)
+			s.markMailingFailed(r.Context(), id)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
-	}
-
-	if _, err := s.db.ExecContext(r.Context(), `UPDATE mailings SET status='sending' WHERE id=$1`, id); err != nil {
-		log.Printf("mailing status error: %v", err)
-		http.Error(w, "server error", http.StatusInternalServerError)
-		return
 	}
 
 	go s.runMailingSend(id)
@@ -915,6 +963,7 @@ func (s *server) runMailingSend(id int64) {
 	m, err := s.loadMailing(ctx, id)
 	if err != nil || m == nil {
 		log.Printf("mailing %d: load for send failed: %v", id, err)
+		s.markMailingFailed(ctx, id)
 		return
 	}
 
@@ -928,6 +977,7 @@ func (s *server) runMailingSend(id int64) {
 		`SELECT id, customer_id, email, token FROM mailing_recipients WHERE mailing_id=$1 AND status='pending' ORDER BY id`, id)
 	if err != nil {
 		log.Printf("mailing %d: recipient load failed: %v", id, err)
+		s.markMailingFailed(ctx, id)
 		return
 	}
 	type pending struct {
@@ -942,6 +992,7 @@ func (s *server) runMailingSend(id int64) {
 		if err := rows.Scan(&p.id, &p.customerID, &p.email, &p.token); err != nil {
 			rows.Close()
 			log.Printf("mailing %d: recipient scan failed: %v", id, err)
+			s.markMailingFailed(ctx, id)
 			return
 		}
 		work = append(work, p)
@@ -949,6 +1000,7 @@ func (s *server) runMailingSend(id int64) {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		log.Printf("mailing %d: recipient load failed: %v", id, err)
+		s.markMailingFailed(ctx, id)
 		return
 	}
 
@@ -1235,9 +1287,13 @@ func (s *server) handleMailingTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	s.testSendFlow(w, r, id, r.FormValue("email"))
+}
+
+func (s *server) testSendFlow(w http.ResponseWriter, r *http.Request, id int64, rawEmail string) {
 	view := s.adminPath("/mailings/view?id=" + strconv.FormatInt(id, 10))
 
-	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	email := strings.ToLower(strings.TrimSpace(rawEmail))
 	if !strings.Contains(email, "@") {
 		http.Redirect(w, r, view+"&msg=testbad", http.StatusSeeOther)
 		return

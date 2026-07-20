@@ -105,11 +105,11 @@
 
     <footer class="pagination">
       {{if gt .Page 1}}
-      <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Query}}&q={{.Query}}{{end}}">Previous</a>
+      <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Previous</a>
       {{end}}
       <span>Page {{.Page}}</span>
       {{if lt (multiply .Page .PageSize) .Total}}
-      <a href="{{.Path}}?page={{add .Page 1}}{{if .Query}}&q={{.Query}}{{end}}">Next</a>
+      <a href="{{.Path}}?page={{add .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Next</a>
       {{end}}
     </footer>
   </div>

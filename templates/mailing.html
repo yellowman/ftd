@@ -50,20 +50,18 @@
         <label class="full">Body (HTML)
           <textarea name="body_html" rows="14" placeholder="&lt;p&gt;Hello!&lt;/p&gt;">{{.Mailing.BodyHTML}}</textarea>
         </label>
-        <button type="submit">Save draft</button>
-      </form>
-      <form method="post" action="{{.AdminPrefix}}/mailings/test" class="send-form">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="id" value="{{.Mailing.ID}}">
-        <label>Test address<input type="email" name="email" placeholder="you@example.com" required></label>
-        <button type="submit">Send test</button>
-        <p class="hint">Delivers the current draft to one address with a “[TEST]” subject prefix. Save the draft first; nothing is recorded.</p>
-      </form>
-      <form method="post" action="{{.AdminPrefix}}/mailings/send" class="send-form">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="id" value="{{.Mailing.ID}}">
-        <button type="submit" class="send">Send mailing</button>
-        <p class="hint">Sends to subscribed, non-bounced customers with an email address{{if .Mailing.ListName.Valid}} in “{{.Mailing.ListName.String}}”{{end}}. Links are click-tracked and an unsubscribe link and open pixel are appended when configured.</p>
+        <div class="send-form">
+          <button type="submit" name="do" value="save">Save draft</button>
+        </div>
+        <div class="send-form">
+          <label>Test address<input type="email" name="test_email" placeholder="you@example.com"></label>
+          <button type="submit" name="do" value="test">Save &amp; send test</button>
+          <p class="hint">Saves your edits, then delivers this draft to one address with a “[TEST]” subject prefix. Nothing is recorded.</p>
+        </div>
+        <div class="send-form">
+          <button type="submit" name="do" value="send" class="send">Save &amp; send mailing</button>
+          <p class="hint">Saves your edits, then sends to the audience selected above (subscribed, non-bounced customers with an email address). Links are click-tracked and an unsubscribe link and open pixel are appended when configured.</p>
+        </div>
       </form>
     </section>
     {{else}}

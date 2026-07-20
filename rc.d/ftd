@@ -16,8 +16,12 @@ rc_reload=NO
 # immediately before exec, so DATABASE_URL (and anything else in ${ftd_envfile})
 # actually reaches the process. Loading it in rc_pre or at the top level does
 # not work: the su(1) login shell discards those exports before ftd starts.
+#
+# ${_bg} is rc.subr's backgrounding token ("&" when rc_bg=YES): the stock
+# rc_start appends it inside the command string, and omitting it here would
+# leave ftd in the foreground and block `rcctl start`.
 rc_start() {
-	${rcexec} "set -a; [ -r '${ftd_envfile}' ] && . '${ftd_envfile}'; set +a; exec ${daemon} ${daemon_flags}"
+	${rcexec} "set -a; [ -r '${ftd_envfile}' ] && . '${ftd_envfile}'; set +a; exec ${daemon} ${daemon_flags} ${_bg}"
 }
 
 rc_cmd $1
