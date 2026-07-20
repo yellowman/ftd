@@ -32,13 +32,47 @@
       </div>
     </header>
 
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>New customer</h2>
+        <p>Create a record by hand — forms only carry whatever optional fields the submitter filled in, so complete the rest here.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label>Email<input type="email" name="email" required></label>
+        <label>Name<input type="text" name="name"></label>
+        <label>Company<input type="text" name="company"></label>
+        <label>Phone<input type="text" name="phone"></label>
+        <label>Address<input type="text" name="address"></label>
+        <label>Tags<input type="text" name="tags" placeholder="comma,separated"></label>
+        <button type="submit">Create customer</button>
+      </form>
+    </section>
+
+    <section class="password-card">
+      <div>
+        <h2>Import / export</h2>
+        <p>CSV with an <code>email</code> column (plus optional name, company, phone, address, tags, notes). Rows upsert by email; blanks never overwrite existing data.</p>
+        <p><a class="export-link" href="{{.AdminPrefix}}/customers/export">Download customers.csv</a></p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/import" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label class="full">CSV file<input type="file" name="file" accept=".csv,text/csv" required></label>
+        <button type="submit">Import CSV</button>
+      </form>
+    </section>
+
     <section class="customers">
       {{if not .Customers}}
       <p>No customers found{{if .Query}} for “{{.Query}}”{{end}}.</p>
       {{else}}
       <table class="table">
         <thead>
-          <tr><th>Name</th><th>Email</th><th>Company</th><th>Phone</th><th>Subs</th><th>Updated</th></tr>
+          <tr><th>Name</th><th>Email</th><th>Company</th><th>Phone</th><th>Subs</th><th>Status</th><th>Updated</th></tr>
         </thead>
         <tbody>
           {{range .Customers}}
@@ -48,6 +82,10 @@
             <td>{{.Company.String}}</td>
             <td>{{.Phone.String}}</td>
             <td>{{.SubmissionCount}}</td>
+            <td>
+              {{if .UnsubscribedAt.Valid}}<span class="status-pill archived">unsubscribed</span>{{end}}
+              {{if .BouncedAt.Valid}}<span class="status-pill failed">bounced</span>{{end}}
+            </td>
             <td>{{.UpdatedAt.Format "2006-01-02"}}</td>
           </tr>
           {{end}}

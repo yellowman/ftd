@@ -10,7 +10,8 @@ Yet another form handler. FastCGI Form Collector which turns submissions into to
 - **Customer records (CRM)**: submissions are linked to customer/contact records keyed on email, with a searchable customer directory and per-customer submission history in the admin UI.
 - **Multi-user admin**: any number of dashboard accounts (add/remove from the Users page); password changes apply to the logged-in user.
 - **Mailing lists**: group customers into lists and target mailings at a list (or all customers).
-- **Mailings**: compose HTML campaigns, send them through an SMTP relay, and track per-recipient delivery, opens (tracking pixel), and unsubscribes — with a `List-Unsubscribe` header and automatic suppression of unsubscribed customers.
+- **Mailings**: compose HTML campaigns, test-send them to yourself, then send through an SMTP relay with per-recipient delivery status, open tracking (pixel), click tracking (per-link redirect stats), unsubscribes (`List-Unsubscribe` header + confirmation page), and automatic suppression of unsubscribed and hard-bounced addresses.
+- **CSV import/export** of the customer book (upsert by email), plus manual customer creation and per-customer activity timelines (notes/calls/emails/meetings interleaved with mailing history).
 - **Built-in throttling** that blocks abusive IPs (over 4 submissions per minute) for 24 hours and temporarily pauses all submissions for 5 minutes when a burst of distinct IPs appears.
 - **Request caps** to protect the FastCGI endpoint from floods (64KB body and 200-field limit, with an adjustable upload budget on top).
 - **Optional file capture** that, when enabled, stores an uploaded file inside the `_ftd` chroot with a unique timestamped name and records both the stored path and the original filename alongside the submission JSON. File uploads are disabled by default.
@@ -107,11 +108,13 @@ directly.
 - The lightweight sample `sample_form.html` remains text-only; use `sample_form_upload.html` for an upload-capable example (with `enctype="multipart/form-data"`).
 
 ## Customers (CRM)
-Every submission is associated with a **customer** record. On intake the handler looks for contact fields in the posted form (case-insensitive) — `email`/`e-mail`/`email_address`, `name` or `first_name`+`last_name`, `company`, `phone` — and, when a plausible email is present, creates or updates a customer keyed on that email (email is lower-cased for stable dedup). The submission is linked to that customer via `submissions.customer_id`; submissions without a usable email are stored unlinked.
+Every submission is associated with a **customer** record. On intake the handler looks for contact fields in the posted form (case-insensitive) — `email`/`e-mail`/`email_address`, `name` or `first_name`+`last_name`, `company`, `phone`, `address` — and, when a plausible email is present, creates or updates a customer keyed on that email (email is lower-cased for stable dedup; blank form fields never overwrite existing customer data). The submission is linked to that customer via `submissions.customer_id`; submissions without a usable email are stored unlinked.
 
 The admin dashboard has a **Customers** tab with:
-- a searchable, paginated contact list (search matches email, name, company, phone);
-- a per-customer page showing the editable profile (name, email, company, phone, address, tags, notes) and the full history of that customer's submissions.
+- a searchable, paginated contact list (search matches email, name, company, phone) with unsubscribed/bounced badges;
+- manual customer creation — since forms only carry whatever optional fields the submitter filled in, records can be started or completed by hand;
+- CSV **export** of the whole book and CSV **import** (needs an `email` column; other columns upsert by email, and blanks never overwrite existing values);
+- a per-customer page with the editable profile (name, email, company, phone, address, tags, notes), an **activity timeline** (log notes/calls/emails/meetings; mailing deliveries appear automatically with open/click annotations), and the customer's submission history.
 
 Editing a customer's email to one already used by another customer is rejected (emails are unique).
 
@@ -119,9 +122,10 @@ Editing a customer's email to one already used by another customer is rejected (
 The dashboard supports multiple accounts. The schema seeds a bootstrap `admin` / `change-me` account; sign in with it, change its password, and add your team from the **Users** page. Anyone can add or delete accounts (you cannot delete the account you are signed in as), and the password form on the dashboard changes the password of whoever is logged in.
 
 ## Lists and mailings
-- **Lists** group customers for targeting. Create a list on the **Lists** page, then add members by customer email (customers are created automatically from form submissions, or edit them under **Customers**).
-- **Mailings** are composed on the **Mailings** page: create a draft, write the HTML body, pick an audience (a list, or all customers), and send. Sending happens in the background over the configured SMTP relay; the mailing page shows per-recipient delivery status, failures, and opens as they happen.
-- Each recipient gets a unique token. When `PUBLIC_BASE_URL` is set, outgoing mail carries a 1x1 open-tracking pixel (`TRACK_PATH/open?t=…`), an unsubscribe footer link (`TRACK_PATH/unsub?t=…`), and a `List-Unsubscribe` header. Unsubscribing marks the customer and all future mailings skip them automatically.
+- **Lists** group customers for targeting. Create a list on the **Lists** page, then add members by customer email, or use the **segment tools** on the list page to bulk-add everyone whose tags match a string or everyone with a form submission in the last N days.
+- **Mailings** are composed on the **Mailings** page: create a draft, write the HTML body, pick an audience (a list, or all customers), optionally **test-send** the draft to yourself (subject gets a `[TEST]` prefix; nothing is recorded), and send. Sending happens in the background over the configured SMTP relay; the mailing page shows per-recipient delivery status, failures, opens, and clicks as they happen.
+- Each recipient gets a unique token. When `PUBLIC_BASE_URL` is set, outgoing mail carries a 1x1 open-tracking pixel (`TRACK_PATH/open?t=…`), an unsubscribe footer link (`TRACK_PATH/unsub?t=…`), and a `List-Unsubscribe` header, and every absolute `http(s)` link in the body is rewritten through the click tracker (`TRACK_PATH/c?t=…&l=…`). Click targets resolve server-side by link id — the redirect never accepts an arbitrary URL, so it cannot be abused as an open redirect. The mailing page shows per-link click totals.
+- Unsubscribing marks the customer and all future mailings skip them automatically. A **hard SMTP failure** (5xx rejection) marks the customer as bounced: they are skipped by future sends and badged in the UI until you clear the flag on their customer page. Transient failures (connection problems, 4xx) only mark that one delivery failed. True asynchronous bounces (accepted-then-bounced) arrive at your relay's return-path mailbox and are outside ftd's view — handle those relay-side.
 - The tracking endpoints are public (no login) and must be routed to the FastCGI socket by your web server — see the deployment recipes.
 - **Deliverability**: bulk mail from a home-grown sender needs correct DNS — publish SPF for your sending domain, sign with DKIM at your relay (e.g. OpenBSD smtpd + `opensmtpd-filter-dkimsign`, or rspamd), and set up rDNS/PTR for the relay IP. Without these, expect spam-foldering.
 

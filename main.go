@@ -117,6 +117,8 @@ type Customer struct {
 	Notes           sql.NullString
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	UnsubscribedAt  sql.NullTime
+	BouncedAt       sql.NullTime
 	SubmissionCount int
 }
 
@@ -386,7 +388,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -441,6 +443,10 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/customers"), customers)
 	mux.Handle(s.adminPath("/customers/view"), customerView)
 	mux.Handle(s.adminPath("/customers/update"), customerUpdate)
+	mux.Handle(s.adminPath("/customers/note"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerNote))))
+	mux.Handle(s.adminPath("/customers/clear-bounce"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerClearBounce))))
+	mux.Handle(s.adminPath("/customers/export"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerExport))))
+	mux.Handle(s.adminPath("/customers/import"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerImport))))
 	mux.Handle(s.adminPath("/users"), users)
 	mux.Handle(s.adminPath("/lists"), lists)
 	mux.Handle(s.adminPath("/lists/view"), listView)
@@ -448,11 +454,14 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/view"), mailingView)
 	mux.Handle(s.adminPath("/mailings/update"), mailingUpdate)
 	mux.Handle(s.adminPath("/mailings/send"), mailingSend)
+	mux.Handle(s.adminPath("/mailings/test"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingTest))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
-	// Public (unauthenticated) mailing endpoints: open-tracking pixel and
-	// unsubscribe. Tokens are per-recipient random values.
+	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
+	// click-tracking redirect, and unsubscribe. Tokens are per-recipient
+	// random values; click targets resolve server-side by link id.
 	mux.HandleFunc(s.trackPath+"/open", s.handleTrackOpen)
+	mux.HandleFunc(s.trackPath+"/c", s.handleTrackClick)
 	mux.HandleFunc(s.trackPath+"/unsub", s.handleTrackUnsub)
 
 	return fcgi.Serve(l, mux)
@@ -1501,21 +1510,22 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 // linkCustomer creates or updates a customer record from a submission's contact
 // fields and returns its id (NULL when no usable email is present).
 func (s *server) linkCustomer(ctx context.Context, payload map[string]interface{}) sql.NullInt64 {
-	email, name, company, phone := extractContact(payload)
+	email, name, company, phone, address := extractContact(payload)
 	if email == "" {
 		return sql.NullInt64{}
 	}
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO customers (email, name, company, phone)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO customers (email, name, company, phone, address)
+		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (email) DO UPDATE SET
 		     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
 		     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
 		     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
+		     address = COALESCE(NULLIF(EXCLUDED.address, ''), customers.address),
 		     updated_at = NOW()
 		 RETURNING id`,
-		email, name, company, phone,
+		email, name, company, phone, address,
 	).Scan(&id)
 	if err != nil {
 		log.Printf("link customer error: %v", err)
@@ -1527,7 +1537,7 @@ func (s *server) linkCustomer(ctx context.Context, payload map[string]interface{
 // extractContact pulls contact details from an arbitrary form payload using
 // case-insensitive matching on common field names. Email must look like an
 // address (contain "@") and is lower-cased so records dedupe consistently.
-func extractContact(payload map[string]interface{}) (email, name, company, phone string) {
+func extractContact(payload map[string]interface{}) (email, name, company, phone, address string) {
 	normalized := make(map[string]string, len(payload))
 	for k, v := range payload {
 		normalized[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(stringifyValue(v))
@@ -1553,7 +1563,8 @@ func extractContact(payload map[string]interface{}) (email, name, company, phone
 	}
 	company = pick("company", "organization", "organisation", "business", "company_name")
 	phone = pick("phone", "telephone", "phone_number", "tel", "mobile")
-	return email, name, company, phone
+	address = pick("address", "street_address", "mailing_address", "postal_address", "location")
+	return email, name, company, phone, address
 }
 
 func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int) ([]Customer, int, error) {
@@ -1567,7 +1578,7 @@ func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int
 	}
 
 	args := append([]interface{}{}, filterArgs...)
-	query := `SELECT c.id, c.email, c.name, c.company, c.phone, c.created_at, c.updated_at,
+	query := `SELECT c.id, c.email, c.name, c.company, c.phone, c.created_at, c.updated_at, c.unsubscribed_at, c.bounced_at,
 	    (SELECT COUNT(*) FROM submissions s WHERE s.customer_id = c.id) AS submission_count
 	    FROM customers c` + where +
 		" ORDER BY c.updated_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
@@ -1582,7 +1593,7 @@ func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int
 	customers := []Customer{}
 	for rows.Next() {
 		var c Customer
-		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.SubmissionCount); err != nil {
+		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt, &c.SubmissionCount); err != nil {
 			return nil, 0, err
 		}
 		customers = append(customers, c)
@@ -1603,9 +1614,9 @@ func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int
 func (s *server) getCustomer(ctx context.Context, id int64) (*Customer, []Submission, error) {
 	var c Customer
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, company, phone, address, tags, notes, created_at, updated_at
+		`SELECT id, email, name, company, phone, address, tags, notes, created_at, updated_at, unsubscribed_at, bounced_at
 		 FROM customers WHERE id = $1`, id,
-	).Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.Address, &c.Tags, &c.Notes, &c.CreatedAt, &c.UpdatedAt)
+	).Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.Address, &c.Tags, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil, nil
 	} else if err != nil {
@@ -1638,6 +1649,44 @@ func (s *server) getCustomer(ctx context.Context, id int64) (*Customer, []Submis
 }
 
 func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
+	// POST creates a customer manually (forms only carry optional contact
+	// fields, so records often need to be started or completed by hand).
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+		if !strings.Contains(email, "@") {
+			http.Error(w, "a valid email is required", http.StatusBadRequest)
+			return
+		}
+		var id int64
+		err := s.db.QueryRowContext(r.Context(),
+			`INSERT INTO customers (email, name, company, phone, address, tags)
+			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''))
+			 ON CONFLICT (email) DO UPDATE SET updated_at = NOW()
+			 RETURNING id`,
+			email,
+			strings.TrimSpace(r.FormValue("name")),
+			strings.TrimSpace(r.FormValue("company")),
+			strings.TrimSpace(r.FormValue("phone")),
+			strings.TrimSpace(r.FormValue("address")),
+			strings.TrimSpace(r.FormValue("tags")),
+		).Scan(&id)
+		if err != nil {
+			log.Printf("create customer error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, s.adminPath("/customers/view?id="+strconv.FormatInt(id, 10)), http.StatusSeeOther)
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1656,6 +1705,14 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var flash *passwordFlash
+	if imported := r.URL.Query().Get("imported"); imported != "" {
+		flash = &passwordFlash{
+			Message: "Import finished: " + imported + " imported, " + r.URL.Query().Get("skipped") + " skipped.",
+			Kind:    "success",
+		}
+	}
+
 	data := map[string]interface{}{
 		"Customers":   customers,
 		"Query":       q,
@@ -1663,6 +1720,7 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 		"Total":       total,
 		"PageSize":    defaultItemsPerPage,
 		"Path":        s.adminPath("/customers"),
+		"Flash":       flash,
 		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
 		"AdminPrefix": s.adminPrefix,
 	}
@@ -1692,9 +1750,17 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	timeline, err := s.loadTimeline(r.Context(), id)
+	if err != nil {
+		log.Printf("timeline error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	data := map[string]interface{}{
 		"Customer":    customer,
 		"Submissions": subs,
+		"Timeline":    timeline,
 		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
 		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
 		"AdminPrefix": s.adminPrefix,

@@ -11,7 +11,10 @@
       <div>
         <p class="eyebrow">ftd · CRM</p>
         <h1>{{if .Customer.Name.Valid}}{{.Customer.Name.String}}{{else if .Customer.Email.Valid}}{{.Customer.Email.String}}{{else}}Customer{{end}}</h1>
-        <p class="lede">Customer #{{.Customer.ID}} · created {{.Customer.CreatedAt.Format "2006-01-02"}} · updated {{.Customer.UpdatedAt.Format "2006-01-02"}}</p>
+        <p class="lede">Customer #{{.Customer.ID}} · created {{.Customer.CreatedAt.Format "2006-01-02"}} · updated {{.Customer.UpdatedAt.Format "2006-01-02"}}
+          {{if .Customer.UnsubscribedAt.Valid}} <span class="status-pill archived">unsubscribed {{.Customer.UnsubscribedAt.Time.Format "2006-01-02"}}</span>{{end}}
+          {{if .Customer.BouncedAt.Valid}} <span class="status-pill failed">bounced {{.Customer.BouncedAt.Time.Format "2006-01-02"}}</span>{{end}}
+        </p>
       </div>
       <div class="actions">
         <nav class="tabs">
@@ -43,6 +46,60 @@
         <button type="submit">Save customer</button>
       </form>
     </section>
+
+    {{if .Customer.BouncedAt.Valid}}
+    <section class="password-card">
+      <div>
+        <h2>Bounced address</h2>
+        <p>A mailing to this address was permanently rejected (SMTP 5xx). Mailings skip it until the bounce is cleared.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/clear-bounce">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        <button type="submit">Clear bounce flag</button>
+      </form>
+    </section>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Log activity</h2>
+        <p>Record a call, meeting, email, or note on this customer's timeline.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/note">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        <label>Kind
+          <select name="kind">
+            <option value="note">Note</option>
+            <option value="call">Call</option>
+            <option value="email">Email</option>
+            <option value="meeting">Meeting</option>
+          </select>
+        </label>
+        <label class="full">Details<textarea name="body" rows="3" required></textarea></label>
+        <button type="submit">Add to timeline</button>
+      </form>
+    </section>
+
+    {{if .Timeline}}
+    <section class="customers">
+      <h2>Timeline</h2>
+      <table class="table">
+        <thead><tr><th>When</th><th>Kind</th><th>Entry</th><th>By</th></tr></thead>
+        <tbody>
+          {{range .Timeline}}
+          <tr>
+            <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+            <td><span class="status-pill {{if eq .Kind "mailing"}}sent{{else}}new{{end}}">{{.Kind}}</span></td>
+            <td class="timeline-body">{{.Body}}</td>
+            <td>{{.CreatedBy.String}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
 
     <section class="submissions">
       <h2>Submission history ({{len .Submissions}})</h2>

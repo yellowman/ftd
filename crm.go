@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"mime/quotedprintable"
 	"net/http"
 	"net/smtp"
+	"net/textproto"
 	"regexp"
 	"strconv"
 	"strings"
@@ -338,6 +342,39 @@ func (s *server) applyListMemberAction(r *http.Request, listID int64) *passwordF
 			return &passwordFlash{Message: "Unable to remove member right now", Kind: "error"}
 		}
 		return &passwordFlash{Message: "Member removed.", Kind: "success"}
+	case "addtag":
+		// Segment tool: add every customer whose tags contain the given text.
+		tag := strings.TrimSpace(r.FormValue("tag"))
+		if tag == "" || len(tag) > 200 {
+			return &passwordFlash{Message: "Enter a tag to match.", Kind: "error"}
+		}
+		res, err := s.db.ExecContext(r.Context(),
+			`INSERT INTO list_members (list_id, customer_id)
+			 SELECT $1, id FROM customers WHERE tags ILIKE $2
+			 ON CONFLICT DO NOTHING`, listID, "%"+tag+"%")
+		if err != nil {
+			log.Printf("addtag error: %v", err)
+			return &passwordFlash{Message: "Unable to add members right now", Kind: "error"}
+		}
+		n, _ := res.RowsAffected()
+		return &passwordFlash{Message: fmt.Sprintf("Added %d customer(s) tagged “%s”.", n, tag), Kind: "success"}
+	case "addrecent":
+		// Segment tool: add every customer with a submission in the last N days.
+		days, err := strconv.Atoi(r.FormValue("days"))
+		if err != nil || days < 1 || days > 3650 {
+			return &passwordFlash{Message: "Enter a number of days (1-3650).", Kind: "error"}
+		}
+		res, err := s.db.ExecContext(r.Context(),
+			`INSERT INTO list_members (list_id, customer_id)
+			 SELECT DISTINCT $1::integer, customer_id FROM submissions
+			 WHERE customer_id IS NOT NULL AND submitted_at > NOW() - make_interval(days => $2)
+			 ON CONFLICT DO NOTHING`, listID, days)
+		if err != nil {
+			log.Printf("addrecent error: %v", err)
+			return &passwordFlash{Message: "Unable to add members right now", Kind: "error"}
+		}
+		n, _ := res.RowsAffected()
+		return &passwordFlash{Message: fmt.Sprintf("Added %d customer(s) active in the last %d days.", n, days), Kind: "success"}
 	}
 	return &passwordFlash{Message: "Unknown action.", Kind: "error"}
 }
@@ -358,16 +395,24 @@ type Mailing struct {
 	Sent      int
 	Failed    int
 	Opened    int
+	Clicked   int
 }
 
 type Recipient struct {
-	ID        int64
-	Email     string
-	Status    string
-	Error     sql.NullString
-	SentAt    sql.NullTime
-	OpenedAt  sql.NullTime
-	OpenCount int
+	ID         int64
+	Email      string
+	Status     string
+	Error      sql.NullString
+	SentAt     sql.NullTime
+	OpenedAt   sql.NullTime
+	OpenCount  int
+	ClickedAt  sql.NullTime
+	ClickCount int
+}
+
+type MailingLink struct {
+	URL        string
+	ClickCount int
 }
 
 func (s *server) smtpConfigured() bool {
@@ -499,9 +544,10 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 
 	// Recipient stats + rows for non-draft mailings.
 	recipients := []Recipient{}
+	mailingLinks := []MailingLink{}
 	if m.Status != "draft" {
 		rows, err := s.db.QueryContext(r.Context(),
-			`SELECT id, email, status, error, sent_at, opened_at, open_count
+			`SELECT id, email, status, error, sent_at, opened_at, open_count, clicked_at, click_count
 			 FROM mailing_recipients WHERE mailing_id=$1 ORDER BY email LIMIT 2000`, id)
 		if err != nil {
 			log.Printf("recipients error: %v", err)
@@ -511,7 +557,7 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		for rows.Next() {
 			var rc Recipient
-			if err := rows.Scan(&rc.ID, &rc.Email, &rc.Status, &rc.Error, &rc.SentAt, &rc.OpenedAt, &rc.OpenCount); err != nil {
+			if err := rows.Scan(&rc.ID, &rc.Email, &rc.Status, &rc.Error, &rc.SentAt, &rc.OpenedAt, &rc.OpenCount, &rc.ClickedAt, &rc.ClickCount); err != nil {
 				log.Printf("scan recipient error: %v", err)
 				http.Error(w, "server error", http.StatusInternalServerError)
 				return
@@ -526,10 +572,36 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 			if rc.OpenedAt.Valid {
 				m.Opened++
 			}
+			if rc.ClickedAt.Valid {
+				m.Clicked++
+			}
 			recipients = append(recipients, rc)
 		}
 		if err := rows.Err(); err != nil {
 			log.Printf("recipients error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+
+		linkRows, err := s.db.QueryContext(r.Context(),
+			`SELECT url, click_count FROM mailing_links WHERE mailing_id=$1 ORDER BY click_count DESC, url`, id)
+		if err != nil {
+			log.Printf("links error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		defer linkRows.Close()
+		for linkRows.Next() {
+			var ml MailingLink
+			if err := linkRows.Scan(&ml.URL, &ml.ClickCount); err != nil {
+				log.Printf("scan link error: %v", err)
+				http.Error(w, "server error", http.StatusInternalServerError)
+				return
+			}
+			mailingLinks = append(mailingLinks, ml)
+		}
+		if err := linkRows.Err(); err != nil {
+			log.Printf("links error: %v", err)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
@@ -564,6 +636,7 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 	renderTemplate(w, "templates/mailing.html", map[string]interface{}{
 		"Mailing":         m,
 		"Recipients":      recipients,
+		"Links":           mailingLinks,
 		"Lists":           lists,
 		"Flash":           mapMailingFlash(r.URL.Query().Get("msg")),
 		"SMTPConfigured":  s.smtpConfigured(),
@@ -587,6 +660,12 @@ func mapMailingFlash(code string) *passwordFlash {
 		return &passwordFlash{Message: "Only drafts can be edited or sent.", Kind: "error"}
 	case "empty":
 		return &passwordFlash{Message: "Subject and body are required before sending.", Kind: "error"}
+	case "testsent":
+		return &passwordFlash{Message: "Test message sent.", Kind: "success"}
+	case "testfail":
+		return &passwordFlash{Message: "Test send failed — check the server log.", Kind: "error"}
+	case "testbad":
+		return &passwordFlash{Message: "Enter a valid test email address.", Kind: "error"}
 	default:
 		return nil
 	}
@@ -687,15 +766,15 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Materialize the recipient set: subscribed customers with an email, from
-	// the selected list or (no list) every customer.
+	// Materialize the recipient set: subscribed, non-bounced customers with an
+	// email, from the selected list or (no list) every customer.
 	recipQuery := `SELECT c.id, c.email FROM customers c
-	    WHERE c.email IS NOT NULL AND c.unsubscribed_at IS NULL`
+	    WHERE c.email IS NOT NULL AND c.unsubscribed_at IS NULL AND c.bounced_at IS NULL`
 	args := []interface{}{}
 	if m.ListID.Valid {
 		recipQuery = `SELECT c.id, c.email FROM customers c
 		    JOIN list_members lm ON lm.customer_id = c.id
-		    WHERE lm.list_id = $1 AND c.email IS NOT NULL AND c.unsubscribed_at IS NULL`
+		    WHERE lm.list_id = $1 AND c.email IS NOT NULL AND c.unsubscribed_at IS NULL AND c.bounced_at IS NULL`
 		args = append(args, m.ListID.Int64)
 	}
 	rows, err := s.db.QueryContext(r.Context(), recipQuery, args...)
@@ -755,6 +834,46 @@ func (s *server) handleMailingSend(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, view+"&msg=sending", http.StatusSeeOther)
 }
 
+// linkHrefRe matches absolute http(s) links in a mailing body so they can be
+// rewritten through the click-tracking redirect.
+var linkHrefRe = regexp.MustCompile(`href="(https?://[^"]+)"`)
+
+// prepareMailingLinks stores each unique link in a mailing body and returns
+// url -> link id for rewriting. Click redirects resolve the URL by id, so the
+// tracking endpoint never accepts an arbitrary URL parameter.
+func (s *server) prepareMailingLinks(ctx context.Context, mailingID int64, body string) (map[string]int64, error) {
+	links := map[string]int64{}
+	if s.publicBaseURL == "" {
+		return links, nil
+	}
+	for _, match := range linkHrefRe.FindAllStringSubmatch(body, -1) {
+		url := match[1]
+		if _, seen := links[url]; seen {
+			continue
+		}
+		var linkID int64
+		if err := s.db.QueryRowContext(ctx,
+			`INSERT INTO mailing_links (mailing_id, url) VALUES ($1, $2)
+			 ON CONFLICT (mailing_id, url) DO UPDATE SET url = EXCLUDED.url
+			 RETURNING id`, mailingID, url).Scan(&linkID); err != nil {
+			return nil, err
+		}
+		links[url] = linkID
+	}
+	return links, nil
+}
+
+// isHardSMTPError reports whether a send failed with a permanent (5xx) SMTP
+// status, meaning the address itself was rejected rather than a transient
+// relay problem.
+func isHardSMTPError(err error) bool {
+	var tpErr *textproto.Error
+	if errors.As(err, &tpErr) {
+		return tpErr.Code >= 500 && tpErr.Code < 600
+	}
+	return false
+}
+
 // runMailingSend delivers a mailing's pending recipients one message at a time
 // and finalizes the mailing status. It runs in the background after send is
 // requested; progress is visible in the mailing view as rows update.
@@ -767,21 +886,28 @@ func (s *server) runMailingSend(id int64) {
 		return
 	}
 
+	links, err := s.prepareMailingLinks(ctx, id, m.BodyHTML)
+	if err != nil {
+		log.Printf("mailing %d: link preparation failed: %v", id, err)
+		links = map[string]int64{}
+	}
+
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, email, token FROM mailing_recipients WHERE mailing_id=$1 AND status='pending' ORDER BY id`, id)
+		`SELECT id, customer_id, email, token FROM mailing_recipients WHERE mailing_id=$1 AND status='pending' ORDER BY id`, id)
 	if err != nil {
 		log.Printf("mailing %d: recipient load failed: %v", id, err)
 		return
 	}
 	type pending struct {
-		id    int64
-		email string
-		token string
+		id         int64
+		customerID sql.NullInt64
+		email      string
+		token      string
 	}
 	work := []pending{}
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.id, &p.email, &p.token); err != nil {
+		if err := rows.Scan(&p.id, &p.customerID, &p.email, &p.token); err != nil {
 			rows.Close()
 			log.Printf("mailing %d: recipient scan failed: %v", id, err)
 			return
@@ -796,7 +922,7 @@ func (s *server) runMailingSend(id int64) {
 
 	sent, failed := 0, 0
 	for _, p := range work {
-		msg := s.buildMessage(m, p.email, p.token)
+		msg := s.buildMessage(m, p.email, p.token, links)
 		err := s.sendSMTP(p.email, msg)
 		if err != nil {
 			failed++
@@ -808,6 +934,15 @@ func (s *server) runMailingSend(id int64) {
 			if _, dbErr := s.db.ExecContext(ctx,
 				`UPDATE mailing_recipients SET status='failed', error=$1 WHERE id=$2`, truncated, p.id); dbErr != nil {
 				log.Printf("mailing %d: recipient update failed: %v", id, dbErr)
+			}
+			// A permanent rejection marks the customer as bounced so future
+			// mailings skip the address (clearable from the customer page).
+			if p.customerID.Valid && isHardSMTPError(err) {
+				if _, dbErr := s.db.ExecContext(ctx,
+					`UPDATE customers SET bounced_at = COALESCE(bounced_at, NOW()) WHERE id=$1`,
+					p.customerID.Int64); dbErr != nil {
+					log.Printf("mailing %d: bounce mark failed: %v", id, dbErr)
+				}
 			}
 			continue
 		}
@@ -830,9 +965,10 @@ func (s *server) runMailingSend(id int64) {
 }
 
 // buildMessage assembles the RFC 5322 message for one recipient: quoted-printable
-// HTML body with an optional tracking pixel and an unsubscribe footer/header
-// when PUBLIC_BASE_URL is configured.
-func (s *server) buildMessage(m *Mailing, email, token string) []byte {
+// HTML body with links rewritten through click tracking, an open-tracking pixel,
+// and an unsubscribe footer/header when PUBLIC_BASE_URL is configured. links
+// maps body URL -> mailing_links id; pass nil to skip click rewriting.
+func (s *server) buildMessage(m *Mailing, email, token string, links map[string]int64) []byte {
 	var openURL, unsubURL string
 	if s.publicBaseURL != "" {
 		openURL = s.publicBaseURL + s.trackPath + "/open?t=" + token
@@ -853,6 +989,12 @@ func (s *server) buildMessage(m *Mailing, email, token string) []byte {
 	buf.WriteString("\r\n")
 
 	body := m.BodyHTML
+	if s.publicBaseURL != "" && len(links) > 0 {
+		for url, linkID := range links {
+			tracked := s.publicBaseURL + s.trackPath + "/c?t=" + token + "&l=" + strconv.FormatInt(linkID, 10)
+			body = strings.ReplaceAll(body, `href="`+url+`"`, `href="`+tracked+`"`)
+		}
+	}
 	if unsubURL != "" {
 		body += "\n<p style=\"font-size:12px;color:#888\"><a href=\"" + unsubURL + "\">Unsubscribe</a></p>"
 	}
@@ -889,6 +1031,49 @@ var trackingPixel = []byte{
 }
 
 var tokenRe = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+// handleTrackClick resolves (recipient token, link id) to the stored URL,
+// records the click (which also implies an open), and redirects. The URL is
+// never taken from the request, so this cannot act as an open redirect.
+func (s *server) handleTrackClick(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("t")
+	linkID, err := strconv.ParseInt(r.URL.Query().Get("l"), 10, 64)
+	if !tokenRe.MatchString(token) || err != nil {
+		http.Error(w, "invalid link", http.StatusBadRequest)
+		return
+	}
+
+	var url string
+	var recipientID int64
+	dbErr := s.db.QueryRowContext(r.Context(),
+		`SELECT ml.url, mr.id FROM mailing_recipients mr
+		 JOIN mailing_links ml ON ml.mailing_id = mr.mailing_id
+		 WHERE mr.token = $1 AND ml.id = $2`, token, linkID,
+	).Scan(&url, &recipientID)
+	if dbErr == sql.ErrNoRows {
+		http.Error(w, "unknown link", http.StatusNotFound)
+		return
+	} else if dbErr != nil {
+		log.Printf("track click lookup error: %v", dbErr)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE mailing_recipients SET click_count = click_count + 1,
+		     clicked_at = COALESCE(clicked_at, NOW()),
+		     open_count = GREATEST(open_count, 1),
+		     opened_at = COALESCE(opened_at, NOW())
+		 WHERE id = $1`, recipientID); err != nil {
+		log.Printf("track click update error: %v", err)
+	}
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE mailing_links SET click_count = click_count + 1 WHERE id = $1`, linkID); err != nil {
+		log.Printf("track link update error: %v", err)
+	}
+
+	http.Redirect(w, r, url, http.StatusSeeOther)
+}
 
 func (s *server) handleTrackOpen(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("t")
@@ -973,4 +1158,336 @@ func (s *server) handleTrackUnsub(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	fmt.Fprintf(w, unsubscribePage, "your address has been removed from our mailing lists.")
+}
+
+// ---- Test send -------------------------------------------------------------
+
+// handleMailingTest sends the current draft to a single arbitrary address with
+// a "[TEST] " subject prefix. No recipient row is stored, so the embedded
+// tracking token records nothing.
+func (s *server) handleMailingTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	view := s.adminPath("/mailings/view?id=" + strconv.FormatInt(id, 10))
+
+	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	if !strings.Contains(email, "@") {
+		http.Redirect(w, r, view+"&msg=testbad", http.StatusSeeOther)
+		return
+	}
+	if !s.smtpConfigured() {
+		http.Redirect(w, r, view+"&msg=nosmtp", http.StatusSeeOther)
+		return
+	}
+
+	m, err := s.loadMailing(r.Context(), id)
+	if err != nil {
+		log.Printf("get mailing error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if m == nil {
+		http.Error(w, "mailing not found", http.StatusNotFound)
+		return
+	}
+	if strings.TrimSpace(m.BodyHTML) == "" {
+		http.Redirect(w, r, view+"&msg=empty", http.StatusSeeOther)
+		return
+	}
+
+	token, err := generateRandomHex(16)
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	testCopy := *m
+	testCopy.Subject = "[TEST] " + m.Subject
+	if err := s.sendSMTP(email, s.buildMessage(&testCopy, email, token, nil)); err != nil {
+		log.Printf("test send to %s failed: %v", email, err)
+		http.Redirect(w, r, view+"&msg=testfail", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, view+"&msg=testsent", http.StatusSeeOther)
+}
+
+// ---- Activity timeline -----------------------------------------------------
+
+type TimelineEntry struct {
+	Kind      string
+	Body      string
+	CreatedBy sql.NullString
+	CreatedAt time.Time
+}
+
+// loadTimeline merges manual activities with mailing deliveries for a customer,
+// newest first.
+func (s *server) loadTimeline(ctx context.Context, customerID int64) ([]TimelineEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT kind, body, created_by, created_at FROM activities WHERE customer_id = $1
+		 UNION ALL
+		 SELECT 'mailing',
+		     m.subject || CASE
+		         WHEN mr.clicked_at IS NOT NULL THEN ' (clicked)'
+		         WHEN mr.opened_at IS NOT NULL THEN ' (opened)'
+		         ELSE '' END,
+		     m.created_by, mr.sent_at
+		 FROM mailing_recipients mr JOIN mailings m ON m.id = mr.mailing_id
+		 WHERE mr.customer_id = $1 AND mr.sent_at IS NOT NULL
+		 ORDER BY created_at DESC LIMIT 200`, customerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := []TimelineEntry{}
+	for rows.Next() {
+		var e TimelineEntry
+		if err := rows.Scan(&e.Kind, &e.Body, &e.CreatedBy, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+var activityKinds = map[string]struct{}{"note": {}, "call": {}, "email": {}, "meeting": {}}
+
+func (s *server) handleCustomerNote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	kind := r.FormValue("kind")
+	body := strings.TrimSpace(r.FormValue("body"))
+	if _, ok := activityKinds[kind]; !ok || body == "" || len(body) > 8000 {
+		http.Error(w, "invalid activity", http.StatusBadRequest)
+		return
+	}
+	user, _ := r.Context().Value(ctxKeyUser).(string)
+	if _, err := s.db.ExecContext(r.Context(),
+		`INSERT INTO activities (customer_id, kind, body, created_by) VALUES ($1, $2, $3, $4)`,
+		id, kind, body, user); err != nil {
+		log.Printf("activity insert error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, s.adminPath("/customers/view?id="+strconv.FormatInt(id, 10)), http.StatusSeeOther)
+}
+
+func (s *server) handleCustomerClearBounce(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE customers SET bounced_at = NULL WHERE id=$1`, id); err != nil {
+		log.Printf("clear bounce error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, s.adminPath("/customers/view?id="+strconv.FormatInt(id, 10)), http.StatusSeeOther)
+}
+
+// ---- CSV import/export -----------------------------------------------------
+
+var csvHeader = []string{"email", "name", "company", "phone", "address", "tags", "notes", "created_at", "unsubscribed", "bounced"}
+
+func (s *server) handleCustomerExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(),
+		`SELECT email, name, company, phone, address, tags, notes, created_at,
+		     unsubscribed_at IS NOT NULL, bounced_at IS NOT NULL
+		 FROM customers ORDER BY id`)
+	if err != nil {
+		log.Printf("export query error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="customers.csv"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write(csvHeader)
+	for rows.Next() {
+		var email, name, company, phone, address, tags, notes sql.NullString
+		var createdAt time.Time
+		var unsubbed, bounced bool
+		if err := rows.Scan(&email, &name, &company, &phone, &address, &tags, &notes, &createdAt, &unsubbed, &bounced); err != nil {
+			log.Printf("export scan error: %v", err)
+			return
+		}
+		_ = cw.Write([]string{
+			email.String, name.String, company.String, phone.String, address.String,
+			tags.String, notes.String, createdAt.UTC().Format(time.RFC3339),
+			strconv.FormatBool(unsubbed), strconv.FormatBool(bounced),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("export error: %v", err)
+	}
+	cw.Flush()
+}
+
+const maxImportBytes = 10 << 20 // 10MB
+
+// handleCustomerImport upserts customers (keyed by email) from an uploaded CSV.
+// The file is parsed from the multipart stream entirely in memory: under the
+// chroot/pledge sandbox there may be no writable filesystem to spill to.
+func (s *server) handleCustomerImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes+64*1024)
+
+	mr, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "expected multipart upload", http.StatusBadRequest)
+		return
+	}
+
+	var csrfToken string
+	var csvData []byte
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, "invalid upload", http.StatusBadRequest)
+			return
+		}
+		switch part.FormName() {
+		case "csrf_token":
+			b, _ := io.ReadAll(io.LimitReader(part, 1024))
+			csrfToken = string(b)
+		case "file":
+			b, err := io.ReadAll(io.LimitReader(part, maxImportBytes+1))
+			if err != nil {
+				http.Error(w, "invalid upload", http.StatusBadRequest)
+				return
+			}
+			if len(b) > maxImportBytes {
+				http.Error(w, "file too large (max 10MB)", http.StatusRequestEntityTooLarge)
+				return
+			}
+			csvData = b
+		default:
+			_, _ = io.Copy(io.Discard, part)
+		}
+	}
+
+	if !s.validateCSRFFromCookie(r, csrfCookieName, csrfToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if len(csvData) == 0 {
+		http.Error(w, "no file uploaded", http.StatusBadRequest)
+		return
+	}
+
+	reader := csv.NewReader(bytes.NewReader(csvData))
+	reader.FieldsPerRecord = -1
+	header, err := reader.Read()
+	if err != nil {
+		http.Error(w, "invalid CSV", http.StatusBadRequest)
+		return
+	}
+	col := map[string]int{}
+	for i, h := range header {
+		col[strings.ToLower(strings.TrimSpace(h))] = i
+	}
+	if _, ok := col["email"]; !ok {
+		http.Error(w, "CSV needs an 'email' column", http.StatusBadRequest)
+		return
+	}
+	field := func(rec []string, name string) string {
+		if i, ok := col[name]; ok && i < len(rec) {
+			return strings.TrimSpace(rec[i])
+		}
+		return ""
+	}
+
+	imported, skipped := 0, 0
+	for {
+		rec, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			skipped++
+			continue
+		}
+		email := strings.ToLower(field(rec, "email"))
+		if !strings.Contains(email, "@") {
+			skipped++
+			continue
+		}
+		if _, err := s.db.ExecContext(r.Context(),
+			`INSERT INTO customers (email, name, company, phone, address, tags, notes)
+			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''), NULLIF($7,''))
+			 ON CONFLICT (email) DO UPDATE SET
+			     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
+			     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
+			     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
+			     address = COALESCE(NULLIF(EXCLUDED.address, ''), customers.address),
+			     tags = COALESCE(NULLIF(EXCLUDED.tags, ''), customers.tags),
+			     notes = COALESCE(NULLIF(EXCLUDED.notes, ''), customers.notes),
+			     updated_at = NOW()`,
+			email, field(rec, "name"), field(rec, "company"), field(rec, "phone"),
+			field(rec, "address"), field(rec, "tags"), field(rec, "notes")); err != nil {
+			log.Printf("import row error for %s: %v", email, err)
+			skipped++
+			continue
+		}
+		imported++
+	}
+
+	http.Redirect(w, r,
+		s.adminPath("/customers?imported="+strconv.Itoa(imported)+"&skipped="+strconv.Itoa(skipped)),
+		http.StatusSeeOther)
 }

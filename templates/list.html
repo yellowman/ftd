@@ -39,6 +39,29 @@
       </form>
     </section>
 
+    <section class="password-card">
+      <div>
+        <h2>Segment tools</h2>
+        <p>Bulk-add customers by tag match or recent form activity. Existing members are left untouched.</p>
+      </div>
+      <div class="segment-forms">
+        <form method="post" action="{{.AdminPrefix}}/lists/view">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="addtag">
+          <input type="hidden" name="id" value="{{.List.ID}}">
+          <label>Tag contains<input type="text" name="tag" placeholder="vip" required></label>
+          <button type="submit">Add tagged</button>
+        </form>
+        <form method="post" action="{{.AdminPrefix}}/lists/view">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="addrecent">
+          <input type="hidden" name="id" value="{{.List.ID}}">
+          <label>Submitted within (days)<input type="number" name="days" min="1" max="3650" value="90" required></label>
+          <button type="submit">Add recent</button>
+        </form>
+      </div>
+    </section>
+
     <section class="customers">
       {{if not .Members}}
       <p>No members yet.</p>

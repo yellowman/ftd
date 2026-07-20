@@ -458,6 +458,33 @@ pre.json {
 
 .comment-block.archived textarea { opacity: 0.6; }
 
+.segment-forms {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.segment-forms form {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.export-link {
+  color: var(--accent-c);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.export-link:hover { text-decoration: underline; }
+
+.timeline-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+input[type="file"] {
+  padding: 0.4rem;
+  border-style: dashed;
+}
+
 @media (max-width: 780px) {
   .container { margin: 0.75rem; padding: 1.25rem; }
   .password-card { grid-template-columns: 1fr; }

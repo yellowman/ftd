@@ -51,18 +51,25 @@
         </label>
         <button type="submit">Save draft</button>
       </form>
+      <form method="post" action="{{.AdminPrefix}}/mailings/test" class="send-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Mailing.ID}}">
+        <label>Test address<input type="email" name="email" placeholder="you@example.com" required></label>
+        <button type="submit">Send test</button>
+        <p class="hint">Delivers the current draft to one address with a “[TEST]” subject prefix. Save the draft first; nothing is recorded.</p>
+      </form>
       <form method="post" action="{{.AdminPrefix}}/mailings/send" class="send-form">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <input type="hidden" name="id" value="{{.Mailing.ID}}">
         <button type="submit" class="send">Send mailing</button>
-        <p class="hint">Sends to subscribed customers with an email address{{if .Mailing.ListName.Valid}} in “{{.Mailing.ListName.String}}”{{end}}. An unsubscribe link and tracking pixel are appended when configured.</p>
+        <p class="hint">Sends to subscribed, non-bounced customers with an email address{{if .Mailing.ListName.Valid}} in “{{.Mailing.ListName.String}}”{{end}}. Links are click-tracked and an unsubscribe link and open pixel are appended when configured.</p>
       </form>
     </section>
     {{else}}
     <section class="customers">
-      <h2>Delivery — {{.Mailing.Sent}}/{{.Mailing.Total}} sent{{if .Mailing.Failed}}, {{.Mailing.Failed}} failed{{end}}, {{.Mailing.Opened}} opened</h2>
+      <h2>Delivery — {{.Mailing.Sent}}/{{.Mailing.Total}} sent{{if .Mailing.Failed}}, {{.Mailing.Failed}} failed{{end}}, {{.Mailing.Opened}} opened, {{.Mailing.Clicked}} clicked</h2>
       <table class="table">
-        <thead><tr><th>Email</th><th>Status</th><th>Sent</th><th>Opened</th><th>Opens</th><th>Error</th></tr></thead>
+        <thead><tr><th>Email</th><th>Status</th><th>Sent</th><th>Opened</th><th>Opens</th><th>Clicks</th><th>Error</th></tr></thead>
         <tbody>
           {{range .Recipients}}
           <tr>
@@ -71,12 +78,27 @@
             <td>{{if .SentAt.Valid}}{{.SentAt.Time.Format "15:04:05"}}{{end}}</td>
             <td>{{if .OpenedAt.Valid}}{{.OpenedAt.Time.Format "2006-01-02 15:04"}}{{end}}</td>
             <td>{{if .OpenCount}}{{.OpenCount}}{{end}}</td>
+            <td>{{if .ClickCount}}{{.ClickCount}}{{end}}</td>
             <td class="err-cell">{{.Error.String}}</td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </section>
+
+    {{if .Links}}
+    <section class="customers">
+      <h2>Link clicks</h2>
+      <table class="table">
+        <thead><tr><th>URL</th><th>Clicks</th></tr></thead>
+        <tbody>
+          {{range .Links}}
+          <tr><td class="file-ref">{{.URL}}</td><td>{{.ClickCount}}</td></tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
     {{end}}
   </div>
 </body>

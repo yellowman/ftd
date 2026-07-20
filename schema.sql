@@ -37,8 +37,9 @@ CREATE TABLE IF NOT EXISTS customers (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Backfill for databases created before the column existed (see note above).
+-- Backfill for databases created before the columns existed (see note above).
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMPTZ;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bounced_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS customers_email_idx ON customers (email);
 CREATE INDEX IF NOT EXISTS customers_updated_at_idx ON customers (updated_at DESC);
@@ -85,6 +86,32 @@ CREATE TABLE IF NOT EXISTS mailing_recipients (
 );
 
 CREATE INDEX IF NOT EXISTS mailing_recipients_mailing_idx ON mailing_recipients (mailing_id);
+
+-- Click tracking: links extracted from a mailing body at send time. Redirects
+-- are keyed by (recipient token, link id), so no URL travels in the query
+-- string and the endpoint cannot be used as an open redirect.
+CREATE TABLE IF NOT EXISTS mailing_links (
+    id SERIAL PRIMARY KEY,
+    mailing_id INTEGER NOT NULL REFERENCES mailings (id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    click_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (mailing_id, url)
+);
+
+ALTER TABLE mailing_recipients ADD COLUMN IF NOT EXISTS clicked_at TIMESTAMPTZ;
+ALTER TABLE mailing_recipients ADD COLUMN IF NOT EXISTS click_count INTEGER NOT NULL DEFAULT 0;
+
+-- Customer activity timeline: manual notes/calls/emails/meetings.
+CREATE TABLE IF NOT EXISTS activities (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER NOT NULL REFERENCES customers (id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('note','call','email','meeting')),
+    body TEXT NOT NULL,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS activities_customer_idx ON activities (customer_id, created_at DESC);
 
 -- Link submissions to customers once the customers table exists. Wrapped so the
 -- script stays idempotent (re-running does not error if the constraint is set).
