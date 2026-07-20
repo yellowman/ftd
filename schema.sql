@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS mailing_recipients (
     customer_id INTEGER REFERENCES customers (id) ON DELETE SET NULL,
     email TEXT NOT NULL,
     token TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','sent','failed')),
     error TEXT,
     sent_at TIMESTAMPTZ,
     opened_at TIMESTAMPTZ,
@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS mailing_recipients (
 );
 
 CREATE INDEX IF NOT EXISTS mailing_recipients_mailing_idx ON mailing_recipients (mailing_id);
+
+-- Upgrade path: databases created before the per-recipient 'sending' claim
+-- state carry the old three-value CHECK; recreate it with the new value set.
+DO $$ BEGIN
+    ALTER TABLE mailing_recipients DROP CONSTRAINT IF EXISTS mailing_recipients_status_check;
+    ALTER TABLE mailing_recipients ADD CONSTRAINT mailing_recipients_status_check
+        CHECK (status IN ('pending','sending','sent','failed'));
+END $$;
 
 -- One row per customer per mailing: guards against duplicate deliveries if a
 -- send is raced or retried. Deduplicates first so upgrades of databases that

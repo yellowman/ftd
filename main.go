@@ -463,6 +463,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/send"), mailingSend)
 	mux.Handle(s.adminPath("/mailings/test"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingTest))))
 	mux.Handle(s.adminPath("/mailings/preview"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingPreview))))
+	mux.Handle(s.adminPath("/mailings/retry"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingRetry))))
 	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
 	mux.Handle(s.adminPath("/"), dashboard)
 

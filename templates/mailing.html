@@ -124,6 +124,20 @@
     </section>
     {{end}}
     {{else}}
+    {{if eq .Mailing.Status "failed"}}
+    <section class="password-card">
+      <div>
+        <h2>Delivery failed</h2>
+        <p>Retry re-sends to recipients that failed transiently or were never attempted. Already-delivered recipients and hard-bounced addresses are skipped.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/mailings/retry">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Mailing.ID}}">
+        <button type="submit">Retry delivery</button>
+      </form>
+    </section>
+    {{end}}
+
     <section class="customers">
       <h2>Delivery — {{.Mailing.Sent}}/{{.Mailing.Total}} sent{{if .Mailing.Failed}}, {{.Mailing.Failed}} failed{{end}}, {{.Mailing.Opened}} opened, {{.Mailing.Clicked}} clicked</h2>
       <table class="table">
@@ -132,7 +146,7 @@
           {{range .Recipients}}
           <tr>
             <td>{{.Email}}</td>
-            <td><span class="status-pill {{if eq .Status "sent"}}complete{{else if eq .Status "failed"}}failed{{else}}new{{end}}">{{.Status}}</span></td>
+            <td><span class="status-pill {{if eq .Status "sent"}}complete{{else if eq .Status "failed"}}failed{{else if eq .Status "sending"}}sending{{else}}new{{end}}">{{.Status}}</span></td>
             <td>{{if .SentAt.Valid}}{{.SentAt.Time.Format "15:04:05"}}{{end}}</td>
             <td>{{if .OpenedAt.Valid}}{{.OpenedAt.Time.Format "2006-01-02 15:04"}}{{end}}</td>
             <td>{{if .OpenCount}}{{.OpenCount}}{{end}}</td>
