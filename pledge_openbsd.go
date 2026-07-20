@@ -15,17 +15,21 @@ import "golang.org/x/sys/unix"
 // run while the process is still unpledged.
 //
 //   - stdio: basic I/O, getentropy, and the like
+//   - rpath: the Go runtime and the pq driver read files during normal
+//     operation and on reconnect (e.g. /etc/resolv.conf, /etc/hosts, timezone
+//     data); without this the first such open(2) aborts the process
 //   - inet:  TCP admin listener and/or PostgreSQL over TCP
+//   - dns:   re-resolve the PostgreSQL host if the connection is re-established
 //   - unix:  Unix FastCGI socket and/or PostgreSQL over a Unix socket
-//   - rpath/wpath/cpath: only when uploads are enabled, to create and write
-//     files under the uploads directory inside the chroot
+//   - wpath/cpath: only when uploads are enabled, to create and write files
+//     under the uploads directory inside the chroot
 func applyPledgeRuntime(allowUnix, allowUploads bool) error {
-	promises := "stdio inet"
+	promises := "stdio rpath inet dns"
 	if allowUnix {
 		promises += " unix"
 	}
 	if allowUploads {
-		promises += " rpath wpath cpath"
+		promises += " wpath cpath"
 	}
 	return unix.PledgePromises(promises)
 }
