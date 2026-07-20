@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mailing · {{.Mailing.Subject}}</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>{{.Mailing.Subject}}</h1>
+        <p class="lede">Mailing #{{.Mailing.ID}} · <span class="status-pill {{.Mailing.Status}}">{{.Mailing.Status}}</span>{{if .Mailing.SentAt.Valid}} · sent {{.Mailing.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}{{if .Mailing.CreatedBy.Valid}} · by {{.Mailing.CreatedBy.String}}{{end}}</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/mailings">← Mailings</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    {{if eq .Mailing.Status "draft"}}
+    {{if not .SMTPConfigured}}
+    <div class="alert warning">SMTP is not configured — set <code>SMTP_HOST</code> and <code>MAIL_FROM</code> before sending.</div>
+    {{end}}
+    {{if not .TrackingEnabled}}
+    <div class="alert warning">Set <code>PUBLIC_BASE_URL</code> to enable open tracking and unsubscribe links in outgoing mail.</div>
+    {{end}}
+
+    <section class="compose-card">
+      <form method="post" action="{{.AdminPrefix}}/mailings/update">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Mailing.ID}}">
+        <label>Subject<input type="text" name="subject" value="{{.Mailing.Subject}}" required></label>
+        <label>Audience
+          <select name="list_id">
+            <option value="">All customers</option>
+            {{range .Lists}}
+            <option value="{{.ID}}" {{if and $.Mailing.ListID.Valid (eq $.Mailing.ListID.Int64 .ID)}}selected{{end}}>{{.Name}}</option>
+            {{end}}
+          </select>
+        </label>
+        <label class="full">Body (HTML)
+          <textarea name="body_html" rows="14" placeholder="&lt;p&gt;Hello!&lt;/p&gt;">{{.Mailing.BodyHTML}}</textarea>
+        </label>
+        <button type="submit">Save draft</button>
+      </form>
+      <form method="post" action="{{.AdminPrefix}}/mailings/send" class="send-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Mailing.ID}}">
+        <button type="submit" class="send">Send mailing</button>
+        <p class="hint">Sends to subscribed customers with an email address{{if .Mailing.ListName.Valid}} in “{{.Mailing.ListName.String}}”{{end}}. An unsubscribe link and tracking pixel are appended when configured.</p>
+      </form>
+    </section>
+    {{else}}
+    <section class="customers">
+      <h2>Delivery — {{.Mailing.Sent}}/{{.Mailing.Total}} sent{{if .Mailing.Failed}}, {{.Mailing.Failed}} failed{{end}}, {{.Mailing.Opened}} opened</h2>
+      <table class="table">
+        <thead><tr><th>Email</th><th>Status</th><th>Sent</th><th>Opened</th><th>Opens</th><th>Error</th></tr></thead>
+        <tbody>
+          {{range .Recipients}}
+          <tr>
+            <td>{{.Email}}</td>
+            <td><span class="status-pill {{if eq .Status "sent"}}complete{{else if eq .Status "failed"}}failed{{else}}new{{end}}">{{.Status}}</span></td>
+            <td>{{if .SentAt.Valid}}{{.SentAt.Time.Format "15:04:05"}}{{end}}</td>
+            <td>{{if .OpenedAt.Valid}}{{.OpenedAt.Time.Format "2006-01-02 15:04"}}{{end}}</td>
+            <td>{{if .OpenCount}}{{.OpenCount}}{{end}}</td>
+            <td class="err-cell">{{.Error.String}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+  </div>
+</body>
+</html>

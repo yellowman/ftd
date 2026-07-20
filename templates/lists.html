@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Lists</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>Mailing Lists</h1>
+        <p class="lede">Group customers into lists to target mailings.</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/customers">Customers</a>
+          <a href="{{.AdminPrefix}}/lists" class="active">Lists</a>
+          <a href="{{.AdminPrefix}}/mailings">Mailings</a>
+          <a href="{{.AdminPrefix}}/users">Users</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>New list</h2>
+        <p>Create a list, then add customers from the list page.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/lists">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="action" value="create">
+        <label>Name<input type="text" name="name" required></label>
+        <label>Description<input type="text" name="description"></label>
+        <button type="submit">Create list</button>
+      </form>
+    </section>
+
+    <section class="customers">
+      {{if not .Lists}}
+      <p>No lists yet.</p>
+      {{else}}
+      <table class="table">
+        <thead><tr><th>Name</th><th>Description</th><th>Members</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          {{range .Lists}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/lists/view?id={{.ID}}">{{.Name}}</a></td>
+            <td>{{.Description.String}}</td>
+            <td>{{.MemberCount}}</td>
+            <td>{{.CreatedAt.Format "2006-01-02"}}</td>
+            <td>
+              <form method="post" action="{{$.AdminPrefix}}/lists" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="id" value="{{.ID}}">
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{end}}
+    </section>
+  </div>
+</body>
+</html>

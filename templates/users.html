@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Users</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · Admin</p>
+        <h1>Users</h1>
+        <p class="lede">Accounts that can sign in to this dashboard. Everyone can manage submissions, customers, and mailings.</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/customers">Customers</a>
+          <a href="{{.AdminPrefix}}/lists">Lists</a>
+          <a href="{{.AdminPrefix}}/mailings">Mailings</a>
+          <a href="{{.AdminPrefix}}/users" class="active">Users</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Add user</h2>
+        <p>Usernames are lowercase (letters, digits, _ . -). Passwords need at least 8 characters.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/users">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="action" value="add">
+        <label>Username<input type="text" name="username" required autocomplete="off"></label>
+        <label>Password<input type="password" name="password" required autocomplete="new-password"></label>
+        <label>Confirm<input type="password" name="confirm" required autocomplete="new-password"></label>
+        <button type="submit">Add user</button>
+      </form>
+    </section>
+
+    <section class="customers">
+      <table class="table">
+        <thead><tr><th>Username</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          {{range .Users}}
+          <tr>
+            <td>{{.Username}}{{if eq .Username $.Self}} <span class="status-pill new">you</span>{{end}}</td>
+            <td>{{.CreatedAt.Format "2006-01-02"}}</td>
+            <td>
+              {{if ne .Username $.Self}}
+              <form method="post" action="{{$.AdminPrefix}}/users" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="username" value="{{.Username}}">
+                <button type="submit" class="danger">Delete</button>
+              </form>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>

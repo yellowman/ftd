@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>List · {{.List.Name}}</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>{{.List.Name}}</h1>
+        <p class="lede">{{if .List.Description.Valid}}{{.List.Description.String}} · {{end}}{{len .Members}} member(s)</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/lists">← Lists</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Add member</h2>
+        <p>Add an existing customer by email address.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/lists/view">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="action" value="add">
+        <input type="hidden" name="id" value="{{.List.ID}}">
+        <label>Email<input type="email" name="email" required></label>
+        <button type="submit">Add to list</button>
+      </form>
+    </section>
+
+    <section class="customers">
+      {{if not .Members}}
+      <p>No members yet.</p>
+      {{else}}
+      <table class="table">
+        <thead><tr><th>Email</th><th>Name</th><th>Company</th><th>Added</th><th></th></tr></thead>
+        <tbody>
+          {{range .Members}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/customers/view?id={{.CustomerID}}">{{.Email.String}}</a>{{if .Unsubbed}} <span class="status-pill archived">unsubscribed</span>{{end}}</td>
+            <td>{{.Name.String}}</td>
+            <td>{{.Company.String}}</td>
+            <td>{{.AddedAt.Format "2006-01-02"}}</td>
+            <td>
+              <form method="post" action="{{$.AdminPrefix}}/lists/view" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="action" value="remove">
+                <input type="hidden" name="id" value="{{$.List.ID}}">
+                <input type="hidden" name="customer_id" value="{{.CustomerID}}">
+                <button type="submit" class="danger">Remove</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{end}}
+    </section>
+  </div>
+</body>
+</html>

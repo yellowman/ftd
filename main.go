@@ -70,6 +70,12 @@ type server struct {
 	uploadLimit           int64
 	submitPath            string
 	adminPrefix           string
+	trackPath             string
+	smtpAddr              string
+	smtpUser              string
+	smtpPass              string
+	mailFrom              string
+	publicBaseURL         string
 	defaultPasswordActive bool
 }
 
@@ -156,6 +162,19 @@ func main() {
 
 	submitPath := normalizePath(os.Getenv("FORM_PATH"), "/form")
 	adminPrefix := normalizePath(os.Getenv("ADMIN_PREFIX"), "/form/admin")
+	trackPath := normalizePath(os.Getenv("TRACK_PATH"), "/form/t")
+
+	// Mailing configuration (all optional; mailings cannot be sent until
+	// SMTP_HOST and MAIL_FROM are set).
+	smtpAddr := ""
+	if host := os.Getenv("SMTP_HOST"); host != "" {
+		port := os.Getenv("SMTP_PORT")
+		if port == "" {
+			port = "25"
+		}
+		smtpAddr = net.JoinHostPort(host, port)
+	}
+	publicBaseURL := strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/")
 
 	uploadLimitMB := int64(0)
 	if limitStr := os.Getenv("MAX_UPLOAD_MB"); limitStr != "" {
@@ -206,12 +225,18 @@ func main() {
 	uploadLimitBytes := uploadLimitMB * 1024 * 1024
 
 	s := &server{
-		db:           db,
-		sessionKey:   sessionKey,
-		secureCookie: secureCookie,
-		uploadLimit:  uploadLimitBytes,
-		submitPath:   submitPath,
-		adminPrefix:  adminPrefix,
+		db:            db,
+		sessionKey:    sessionKey,
+		secureCookie:  secureCookie,
+		uploadLimit:   uploadLimitBytes,
+		submitPath:    submitPath,
+		adminPrefix:   adminPrefix,
+		trackPath:     trackPath,
+		smtpAddr:      smtpAddr,
+		smtpUser:      os.Getenv("SMTP_USER"),
+		smtpPass:      os.Getenv("SMTP_PASS"),
+		mailFrom:      os.Getenv("MAIL_FROM"),
+		publicBaseURL: publicBaseURL,
 	}
 
 	if err := s.refreshDefaultPasswordFlag(context.Background()); err != nil {
@@ -289,11 +314,11 @@ func dropPrivilegesIfRoot() error {
 
 func ensureAdminPresent(db *sql.DB) error {
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&count); err != nil {
-		return fmt.Errorf("checking admin user: %w", err)
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count); err != nil {
+		return fmt.Errorf("checking admin users: %w", err)
 	}
 	if count == 0 {
-		return fmt.Errorf("admin user '%s' missing; apply schema.sql to create the default account", defaultAdminUser)
+		return fmt.Errorf("no admin users exist; apply schema.sql to create the default account")
 	}
 	return nil
 }
@@ -326,7 +351,10 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	var hash string
 	err := s.db.QueryRowContext(ctx, "SELECT password_hash FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&hash)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("admin user '%s' missing; apply schema.sql to create it", defaultAdminUser)
+		// The bootstrap 'admin' account has been removed (multi-user setups may
+		// do this deliberately); there is no default password to warn about.
+		s.defaultPasswordActive = false
+		return nil
 	} else if err != nil {
 		return fmt.Errorf("checking admin password: %w", err)
 	}
@@ -358,7 +386,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -395,6 +423,13 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	customers := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomers)))
 	customerView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerView)))
 	customerUpdate := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerUpdate)))
+	users := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleUsers)))
+	lists := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleLists)))
+	listView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleListView)))
+	mailings := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailings)))
+	mailingView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingView)))
+	mailingUpdate := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingUpdate)))
+	mailingSend := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingSend)))
 	dashboard := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDashboard)))
 
 	mux.Handle(s.adminPath("/login"), login)
@@ -406,7 +441,19 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/customers"), customers)
 	mux.Handle(s.adminPath("/customers/view"), customerView)
 	mux.Handle(s.adminPath("/customers/update"), customerUpdate)
+	mux.Handle(s.adminPath("/users"), users)
+	mux.Handle(s.adminPath("/lists"), lists)
+	mux.Handle(s.adminPath("/lists/view"), listView)
+	mux.Handle(s.adminPath("/mailings"), mailings)
+	mux.Handle(s.adminPath("/mailings/view"), mailingView)
+	mux.Handle(s.adminPath("/mailings/update"), mailingUpdate)
+	mux.Handle(s.adminPath("/mailings/send"), mailingSend)
 	mux.Handle(s.adminPath("/"), dashboard)
+
+	// Public (unauthenticated) mailing endpoints: open-tracking pixel and
+	// unsubscribe. Tokens are per-recipient random values.
+	mux.HandleFunc(s.trackPath+"/open", s.handleTrackOpen)
+	mux.HandleFunc(s.trackPath+"/unsub", s.handleTrackUnsub)
 
 	return fcgi.Serve(l, mux)
 }
@@ -1301,8 +1348,15 @@ func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The password change applies to whoever is logged in, not a fixed account.
+	username, _ := r.Context().Value(ctxKeyUser).(string)
+	if username == "" {
+		redirect("error")
+		return
+	}
+
 	var existingHash string
-	if err := s.db.QueryRowContext(r.Context(), "SELECT password_hash FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&existingHash); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), "SELECT password_hash FROM admin_users WHERE username=$1", username).Scan(&existingHash); err != nil {
 		log.Printf("password fetch error: %v", err)
 		redirect("error")
 		return
@@ -1313,14 +1367,14 @@ func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	hash, err := hashPassword(newPassword)
 	if err != nil {
 		log.Printf("password hash error: %v", err)
 		redirect("error")
 		return
 	}
 
-	if _, err := s.db.ExecContext(r.Context(), "UPDATE admin_users SET password_hash=$1 WHERE username=$2", string(hash), defaultAdminUser); err != nil {
+	if _, err := s.db.ExecContext(r.Context(), "UPDATE admin_users SET password_hash=$1 WHERE username=$2", hash, username); err != nil {
 		log.Printf("password update error: %v", err)
 		redirect("error")
 		return
@@ -1330,8 +1384,16 @@ func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		log.Printf("password flag refresh error: %v", err)
 	}
 
-	s.issueSession(w, defaultAdminUser)
+	s.issueSession(w, username)
 	redirect("updated")
+}
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
 }
 
 func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {

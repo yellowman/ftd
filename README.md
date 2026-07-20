@@ -8,6 +8,9 @@ Yet another form handler. FastCGI Form Collector which turns submissions into to
 - **PostgreSQL persistence** with JSONB storage for arbitrary form fields and request metadata (real source IP, the client-supplied `X-Forwarded-For` header, user agent, referrer, timestamp). Both the trusted peer address and the forwarded header are stored as-is — the forwarded value is attacker-controllable, so treat it accordingly when reviewing.
 - **Admin dashboard** with login (bcrypt passwords stored in the database), pagination, status management (`new`, `in_progress`, `complete`, `archived`), CSRF protection, hardened cookies, and nicely formatted JSON payloads.
 - **Customer records (CRM)**: submissions are linked to customer/contact records keyed on email, with a searchable customer directory and per-customer submission history in the admin UI.
+- **Multi-user admin**: any number of dashboard accounts (add/remove from the Users page); password changes apply to the logged-in user.
+- **Mailing lists**: group customers into lists and target mailings at a list (or all customers).
+- **Mailings**: compose HTML campaigns, send them through an SMTP relay, and track per-recipient delivery, opens (tracking pixel), and unsubscribes — with a `List-Unsubscribe` header and automatic suppression of unsubscribed customers.
 - **Built-in throttling** that blocks abusive IPs (over 4 submissions per minute) for 24 hours and temporarily pauses all submissions for 5 minutes when a burst of distinct IPs appears.
 - **Request caps** to protect the FastCGI endpoint from floods (64KB body and 200-field limit, with an adjustable upload budget on top).
 - **Optional file capture** that, when enabled, stores an uploaded file inside the `_ftd` chroot with a unique timestamped name and records both the stored path and the original filename alongside the submission JSON. File uploads are disabled by default.
@@ -25,6 +28,12 @@ Set the following environment variables before running the server:
 | `SESSION_SECRET` | Secret used to sign admin session cookies; if omitted, an ephemeral random key is generated (sessions reset on restart). | Generated per process when unset |
 | `SESSION_COOKIE_INSECURE` | If set, disables the default `Secure` cookie flag for admin/csrf cookies (useful for plain HTTP dev). | Not set (Secure cookies enabled) |
 | `MAX_UPLOAD_MB` | Maximum allowed file upload size in megabytes; `0` disables uploads. | `0` |
+| `SMTP_HOST` | SMTP relay host for outgoing mailings (e.g. `127.0.0.1` for a local smtpd). Mailings cannot be sent while unset. | Not set |
+| `SMTP_PORT` | SMTP relay port. | `25` |
+| `SMTP_USER` / `SMTP_PASS` | Optional SMTP AUTH credentials (PLAIN, used over STARTTLS when the relay offers it). | Not set |
+| `MAIL_FROM` | From address for outgoing mailings. Required (with `SMTP_HOST`) to send. | Not set |
+| `PUBLIC_BASE_URL` | Public origin of your site (e.g. `https://example.com`), used to build open-tracking and unsubscribe URLs in outgoing mail. Without it, mailings send with no tracking pixel or unsubscribe link. | Not set |
+| `TRACK_PATH` | FastCGI path prefix for the public tracking endpoints (`<TRACK_PATH>/open`, `<TRACK_PATH>/unsub`). | `/form/t` |
 
 ## Database schema
 Initialize the schema before the first run (ftd does not apply migrations at runtime and will exit if required tables are missi
@@ -106,6 +115,16 @@ The admin dashboard has a **Customers** tab with:
 
 Editing a customer's email to one already used by another customer is rejected (emails are unique).
 
+## Users
+The dashboard supports multiple accounts. The schema seeds a bootstrap `admin` / `change-me` account; sign in with it, change its password, and add your team from the **Users** page. Anyone can add or delete accounts (you cannot delete the account you are signed in as), and the password form on the dashboard changes the password of whoever is logged in.
+
+## Lists and mailings
+- **Lists** group customers for targeting. Create a list on the **Lists** page, then add members by customer email (customers are created automatically from form submissions, or edit them under **Customers**).
+- **Mailings** are composed on the **Mailings** page: create a draft, write the HTML body, pick an audience (a list, or all customers), and send. Sending happens in the background over the configured SMTP relay; the mailing page shows per-recipient delivery status, failures, and opens as they happen.
+- Each recipient gets a unique token. When `PUBLIC_BASE_URL` is set, outgoing mail carries a 1x1 open-tracking pixel (`TRACK_PATH/open?t=…`), an unsubscribe footer link (`TRACK_PATH/unsub?t=…`), and a `List-Unsubscribe` header. Unsubscribing marks the customer and all future mailings skip them automatically.
+- The tracking endpoints are public (no login) and must be routed to the FastCGI socket by your web server — see the deployment recipes.
+- **Deliverability**: bulk mail from a home-grown sender needs correct DNS — publish SPF for your sending domain, sign with DKIM at your relay (e.g. OpenBSD smtpd + `opensmtpd-filter-dkimsign`, or rspamd), and set up rDNS/PTR for the relay IP. Without these, expect spam-foldering.
+
 ## Status workflow
 Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete`, or `archived`. Completed submissions remain available but collapse into the lower section; archived items stay out of the main dashboard and live in the dedicated Archived view with its own pagination. A bulk "Archive completed" control is available on the Active dashboard to sweep all completed rows into the archived view at once. Each submission also supports an internal reviewer comment field; it can be edited alongside status updates and is rendered in a muted, read-only state when the submission is archived.
 
@@ -115,7 +134,8 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
 - Block information is stored in the `submission_blocks` table; expired blocks are cleaned when new requests arrive.
 
 ## Files
-- `main.go` – FastCGI listener, admin routes, and handlers.
+- `main.go` – FastCGI listener, submission intake, auth/session handling, dashboard and customer handlers.
+- `crm.go` – Users, lists, mailings (SMTP sending), and the public open-tracking/unsubscribe endpoints.
 - `schema.sql` – PostgreSQL schema and indexes.
 - `templates/` – Admin HTML templates.
 - `static/` – Admin CSS assets.
@@ -162,6 +182,10 @@ Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete
        listen on * port 80
 
        location "/form" {
+           fastcgi socket "/var/www/run/ftd.sock"
+       }
+
+       location "/form/t/*" {
            fastcgi socket "/var/www/run/ftd.sock"
        }
 
@@ -219,6 +243,9 @@ EOF
            fastcgi_pass unix:/var/www/run/ftd.sock;
        }
 
+       # /form/t/* (tracking) and /form/admin/ are covered by the /form prefix
+       # above; add explicit blocks if you use custom TRACK_PATH/ADMIN_PREFIX
+       # values outside FORM_PATH.
        location /form/admin/ {
            include fastcgi_params;
            fastcgi_pass unix:/var/www/run/ftd.sock;

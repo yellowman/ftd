@@ -37,9 +37,54 @@ CREATE TABLE IF NOT EXISTS customers (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Backfill for databases created before the column existed (see note above).
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS unsubscribed_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS customers_email_idx ON customers (email);
 CREATE INDEX IF NOT EXISTS customers_updated_at_idx ON customers (updated_at DESC);
 CREATE INDEX IF NOT EXISTS submissions_customer_id_idx ON submissions (customer_id);
+
+-- Mailing lists / segments.
+CREATE TABLE IF NOT EXISTS lists (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS list_members (
+    list_id INTEGER NOT NULL REFERENCES lists (id) ON DELETE CASCADE,
+    customer_id INTEGER NOT NULL REFERENCES customers (id) ON DELETE CASCADE,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (list_id, customer_id)
+);
+
+-- Mailings (campaigns) and their per-recipient delivery/tracking rows.
+CREATE TABLE IF NOT EXISTS mailings (
+    id SERIAL PRIMARY KEY,
+    subject TEXT NOT NULL,
+    body_html TEXT NOT NULL,
+    list_id INTEGER REFERENCES lists (id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','sending','sent','failed')),
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS mailing_recipients (
+    id SERIAL PRIMARY KEY,
+    mailing_id INTEGER NOT NULL REFERENCES mailings (id) ON DELETE CASCADE,
+    customer_id INTEGER REFERENCES customers (id) ON DELETE SET NULL,
+    email TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed')),
+    error TEXT,
+    sent_at TIMESTAMPTZ,
+    opened_at TIMESTAMPTZ,
+    open_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS mailing_recipients_mailing_idx ON mailing_recipients (mailing_id);
 
 -- Link submissions to customers once the customers table exists. Wrapped so the
 -- script stays idempotent (re-running does not error if the constraint is set).
