@@ -3,26 +3,21 @@
 #
 daemon="/usr/local/bin/ftd"
 daemon_flags=${ftd_flags:-""}
-pexp="${daemon##*/}"
-
-: ${ftd_envfile:=/etc/ftd.env}
 
 . /etc/rc.d/rc.subr
 
 rc_bg=YES
 rc_reload=NO
 
-load_env() {
-        if [ -f "${ftd_envfile}" ]; then
-                set -a
-                . "${ftd_envfile}"
-                set +a
-        fi
-}
+: ${ftd_envfile:=/etc/ftd.env}
 
-rc_pre() {
-        load_env
-        return 0
+# rc.subr launches the daemon through `su -l` to apply its login class, and a
+# login shell resets the environment. Source the config inside that same shell,
+# immediately before exec, so DATABASE_URL (and anything else in ${ftd_envfile})
+# actually reaches the process. Loading it in rc_pre or at the top level does
+# not work: the su(1) login shell discards those exports before ftd starts.
+rc_start() {
+	${rcexec} "set -a; [ -r '${ftd_envfile}' ] && . '${ftd_envfile}'; set +a; exec ${daemon} ${daemon_flags}"
 }
 
 rc_cmd $1
