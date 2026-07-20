@@ -198,9 +198,93 @@ Bounces can be cleared from the customer page. Async bounces that arrive at
 your relay's return-path mailbox are outside ftd's view — handle those at the
 relay.
 
-**Deliverability** — publish SPF, sign with DKIM at the relay (OpenBSD smtpd +
-`opensmtpd-filter-dkimsign`, or rspamd), and set rDNS/PTR for the relay IP, or
-expect spam-foldering.
+**Deliverability** — publish SPF, sign with DKIM at the relay (setups below),
+and set rDNS/PTR for the relay IP, or expect spam-foldering.
+
+## DKIM signing at the relay
+
+ftd hands mail to your local MTA (`SMTP_HOST=127.0.0.1`); the MTA signs it on
+the way out. Either recipe below ends with the same DNS step.
+
+### OpenBSD: OpenSMTPD + filter-dkimsign
+
+```sh
+pkg_add opensmtpd-filter-dkimsign
+
+# 2048-bit RSA key, readable only by the filter user
+install -d -o _dkimsign -g _dkimsign -m 700 /etc/mail/dkim
+openssl genrsa -out /etc/mail/dkim/example.com.key 2048
+chown _dkimsign:_dkimsign /etc/mail/dkim/example.com.key
+chmod 400 /etc/mail/dkim/example.com.key
+```
+
+`/etc/mail/smtpd.conf` — add the filter and attach it to the listener ftd
+submits on (pick any selector name; the year works well):
+
+```
+filter "dkimsign" proc-exec "filter-dkimsign -d example.com -s 2026 \
+    -k /etc/mail/dkim/example.com.key" user _dkimsign group _dkimsign
+
+listen on socket filter "dkimsign"
+listen on lo0 filter "dkimsign"
+
+action "outbound" relay
+match from local for any action "outbound"
+```
+
+```sh
+rcctl restart smtpd
+```
+
+### Postfix + OpenDKIM (Debian/Ubuntu flavored)
+
+```sh
+sudo apt-get install -y opendkim opendkim-tools
+sudo mkdir -p /etc/opendkim/keys/example.com
+sudo opendkim-genkey -D /etc/opendkim/keys/example.com -d example.com -s 2026
+sudo chown -R opendkim:opendkim /etc/opendkim/keys
+```
+
+Append to `/etc/opendkim.conf` (simple single-domain setup):
+
+```
+Domain    example.com
+Selector  2026
+KeyFile   /etc/opendkim/keys/example.com/2026.private
+Socket    inet:8891@127.0.0.1
+```
+
+Append to `/etc/postfix/main.cf`:
+
+```
+smtpd_milters = inet:127.0.0.1:8891
+non_smtpd_milters = $smtpd_milters
+milter_default_action = accept
+```
+
+```sh
+sudo systemctl restart opendkim postfix
+```
+
+### DNS record (both setups)
+
+Publish the public key as a TXT record at `2026._domainkey.example.com`:
+
+```
+2026._domainkey.example.com. IN TXT "v=DKIM1; k=rsa; p=<base64 public key>"
+```
+
+With OpenDKIM the ready-made record is in
+`/etc/opendkim/keys/example.com/2026.txt`. For the OpenSMTPD key, print the
+`p=` value with:
+
+```sh
+openssl rsa -in /etc/mail/dkim/example.com.key -pubout -outform der | openssl base64 -A
+```
+
+Verify by mailing a Gmail address and checking "show original" for
+`DKIM: PASS`, or use a tester like mail-tester.com. When you rotate keys,
+pick a new selector, publish the new TXT record, then switch the signer.
 
 ## Security notes
 
