@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Customer · {{if .Customer.Name.Valid}}{{.Customer.Name.String}}{{else}}{{.Customer.Email.String}}{{end}}</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>{{if .Customer.Name.Valid}}{{.Customer.Name.String}}{{else if .Customer.Email.Valid}}{{.Customer.Email.String}}{{else}}Customer{{end}}</h1>
+        <p class="lede">Customer #{{.Customer.ID}} · created {{.Customer.CreatedAt.Format "2006-01-02"}} · updated {{.Customer.UpdatedAt.Format "2006-01-02"}}</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/customers">← Customers</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Contact details</h2>
+        <p>Edit the record. Email must be unique across customers.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/update">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        <label>Name<input type="text" name="name" value="{{.Customer.Name.String}}"></label>
+        <label>Email<input type="email" name="email" value="{{.Customer.Email.String}}"></label>
+        <label>Company<input type="text" name="company" value="{{.Customer.Company.String}}"></label>
+        <label>Phone<input type="text" name="phone" value="{{.Customer.Phone.String}}"></label>
+        <label>Tags<input type="text" name="tags" value="{{.Customer.Tags.String}}" placeholder="comma,separated"></label>
+        <label class="full">Address<input type="text" name="address" value="{{.Customer.Address.String}}"></label>
+        <label class="full">Notes<textarea name="notes" rows="4">{{.Customer.Notes.String}}</textarea></label>
+        <button type="submit">Save customer</button>
+      </form>
+    </section>
+
+    <section class="submissions">
+      <h2>Submission history ({{len .Submissions}})</h2>
+      {{if not .Submissions}}
+      <p>No submissions linked to this customer.</p>
+      {{else}}
+      {{range .Submissions}}
+      <div class="card {{.Status}}">
+        <div class="meta">
+          <div class="meta-top">
+            <span class="id-pill">#{{.ID}}</span>
+            <span class="status-pill {{.Status}}">{{.Status}}</span>
+          </div>
+          <div class="meta-bottom">
+            <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
+            <div><strong>Source IP</strong><span>{{.IP.String}}</span></div>
+            {{if .FilePath.Valid}}
+            <div><strong>Uploaded File</strong><span class="file-ref">{{.FilePath.String}}</span></div>
+            {{end}}
+          </div>
+        </div>
+        {{if .Fields}}
+        <dl class="fields">
+          {{range .Fields}}
+          <div class="field-row"><dt>{{.Key}}</dt><dd>{{.Value}}</dd></div>
+          {{end}}
+        </dl>
+        {{end}}
+        {{if .Comment.Valid}}<p class="hint">Note: {{.Comment.String}}</p>{{end}}
+      </div>
+      {{end}}
+      {{end}}
+    </section>
+  </div>
+</body>
+</html>

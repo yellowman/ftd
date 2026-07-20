@@ -345,3 +345,55 @@ pre.json {
   color: #64748b;
   border-color: #e2e8f0;
 }
+
+.customers {
+  margin-bottom: 1rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid #eef2f7;
+  color: #334155;
+}
+
+.table th {
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.table a {
+  color: #2563eb;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.password-card label.full {
+  grid-column: 1 / -1;
+}
+
+.password-card textarea {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  padding: 0.5rem 0.6rem;
+  color: #0f172a;
+  background: #fff;
+}

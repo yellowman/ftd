@@ -100,6 +100,20 @@ type FieldEntry struct {
 	Value string
 }
 
+type Customer struct {
+	ID              int64
+	Email           sql.NullString
+	Name            sql.NullString
+	Company         sql.NullString
+	Phone           sql.NullString
+	Address         sql.NullString
+	Tags            sql.NullString
+	Notes           sql.NullString
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	SubmissionCount int
+}
+
 type passwordFlash struct {
 	Message string
 	Kind    string
@@ -344,7 +358,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -378,6 +392,9 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	archiveCompleted := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchiveCompleted)))
 	changePassword := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleChangePassword)))
 	archived := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchived)))
+	customers := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomers)))
+	customerView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerView)))
+	customerUpdate := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerUpdate)))
 	dashboard := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDashboard)))
 
 	mux.Handle(s.adminPath("/login"), login)
@@ -386,6 +403,9 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/archive-completed"), archiveCompleted)
 	mux.Handle(s.adminPath("/password"), changePassword)
 	mux.Handle(s.adminPath("/archived"), archived)
+	mux.Handle(s.adminPath("/customers"), customers)
+	mux.Handle(s.adminPath("/customers/view"), customerView)
+	mux.Handle(s.adminPath("/customers/update"), customerUpdate)
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	return fcgi.Serve(l, mux)
@@ -479,9 +499,13 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	ua := r.UserAgent()
 	ref := r.Referer()
 
+	// Associate the submission with a customer record (created or updated from
+	// the form's contact fields) so intake feeds the CRM.
+	customerID := s.linkCustomer(r.Context(), payload)
+
 	_, err = s.db.Exec(
-		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data) VALUES ($1, $2, $3, $4, $5, $6)`,
-		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON,
+		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON, customerID,
 	)
 	if err != nil {
 		log.Printf("insert submission error: %v", err)
@@ -1410,6 +1434,278 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	}
 
 	return submissions, total, nil
+}
+
+// linkCustomer creates or updates a customer record from a submission's contact
+// fields and returns its id (NULL when no usable email is present).
+func (s *server) linkCustomer(ctx context.Context, payload map[string]interface{}) sql.NullInt64 {
+	email, name, company, phone := extractContact(payload)
+	if email == "" {
+		return sql.NullInt64{}
+	}
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO customers (email, name, company, phone)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (email) DO UPDATE SET
+		     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
+		     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
+		     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
+		     updated_at = NOW()
+		 RETURNING id`,
+		email, name, company, phone,
+	).Scan(&id)
+	if err != nil {
+		log.Printf("link customer error: %v", err)
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: id, Valid: true}
+}
+
+// extractContact pulls contact details from an arbitrary form payload using
+// case-insensitive matching on common field names. Email must look like an
+// address (contain "@") and is lower-cased so records dedupe consistently.
+func extractContact(payload map[string]interface{}) (email, name, company, phone string) {
+	normalized := make(map[string]string, len(payload))
+	for k, v := range payload {
+		normalized[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(stringifyValue(v))
+	}
+	pick := func(keys ...string) string {
+		for _, want := range keys {
+			if val := normalized[want]; val != "" {
+				return val
+			}
+		}
+		return ""
+	}
+
+	email = strings.ToLower(pick("email", "e-mail", "email_address", "emailaddress", "your_email"))
+	if !strings.Contains(email, "@") {
+		email = ""
+	}
+	name = pick("name", "full_name", "fullname", "your_name", "contact_name")
+	if name == "" {
+		first := pick("first_name", "firstname", "fname")
+		last := pick("last_name", "lastname", "lname")
+		name = strings.TrimSpace(first + " " + last)
+	}
+	company = pick("company", "organization", "organisation", "business", "company_name")
+	phone = pick("phone", "telephone", "phone_number", "tel", "mobile")
+	return email, name, company, phone
+}
+
+func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int) ([]Customer, int, error) {
+	offset := (page - 1) * pageSize
+
+	where := ""
+	filterArgs := []interface{}{}
+	if q != "" {
+		where = " WHERE (c.email ILIKE $1 OR c.name ILIKE $1 OR c.company ILIKE $1 OR c.phone ILIKE $1)"
+		filterArgs = append(filterArgs, "%"+q+"%")
+	}
+
+	args := append([]interface{}{}, filterArgs...)
+	query := `SELECT c.id, c.email, c.name, c.company, c.phone, c.created_at, c.updated_at,
+	    (SELECT COUNT(*) FROM submissions s WHERE s.customer_id = c.id) AS submission_count
+	    FROM customers c` + where +
+		" ORDER BY c.updated_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
+	args = append(args, pageSize, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	customers := []Customer{}
+	for rows.Next() {
+		var c Customer
+		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.SubmissionCount); err != nil {
+			return nil, 0, err
+		}
+		customers = append(customers, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM customers c"+where, filterArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	return customers, total, nil
+}
+
+// getCustomer loads a customer and its linked submissions. Returns a nil
+// customer (no error) when the id does not exist.
+func (s *server) getCustomer(ctx context.Context, id int64) (*Customer, []Submission, error) {
+	var c Customer
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, email, name, company, phone, address, tags, notes, created_at, updated_at
+		 FROM customers WHERE id = $1`, id,
+	).Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.Address, &c.Tags, &c.Notes, &c.CreatedAt, &c.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil, nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, submitted_at, ip_address, forwarded_for, user_agent, referer, status, file_path, comment, form_data
+		 FROM submissions WHERE customer_id = $1 ORDER BY submitted_at DESC LIMIT 200`, id,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	subs := []Submission{}
+	for rows.Next() {
+		var sub Submission
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData); err != nil {
+			return nil, nil, err
+		}
+		sub.FormPretty = formatJSON(sub.FormData)
+		sub.Fields = extractFields(sub.FormData)
+		subs = append(subs, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return &c, subs, nil
+}
+
+func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	customers, total, err := s.listCustomers(r.Context(), q, page, defaultItemsPerPage)
+	if err != nil {
+		log.Printf("list customers error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	data := map[string]interface{}{
+		"Customers":   customers,
+		"Query":       q,
+		"Page":        page,
+		"Total":       total,
+		"PageSize":    defaultItemsPerPage,
+		"Path":        s.adminPath("/customers"),
+		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix": s.adminPrefix,
+	}
+	renderTemplate(w, "templates/customers.html", data)
+}
+
+func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	customer, subs, err := s.getCustomer(r.Context(), id)
+	if err != nil {
+		log.Printf("get customer error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if customer == nil {
+		http.Error(w, "customer not found", http.StatusNotFound)
+		return
+	}
+
+	data := map[string]interface{}{
+		"Customer":    customer,
+		"Submissions": subs,
+		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
+		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix": s.adminPrefix,
+	}
+	renderTemplate(w, "templates/customer.html", data)
+}
+
+func (s *server) handleCustomerUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	if email != "" && !strings.Contains(email, "@") {
+		http.Error(w, "invalid email", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	company := strings.TrimSpace(r.FormValue("company"))
+	phone := strings.TrimSpace(r.FormValue("phone"))
+	address := strings.TrimSpace(r.FormValue("address"))
+	tags := strings.TrimSpace(r.FormValue("tags"))
+	notes := strings.TrimSpace(r.FormValue("notes"))
+
+	for _, field := range []string{name, company, phone, tags} {
+		if len(field) > 500 {
+			http.Error(w, "field too long", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
+	if len(address) > 2000 || len(notes) > 8000 {
+		http.Error(w, "field too long", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	viewURL := s.adminPath("/customers/view?id=" + strconv.FormatInt(id, 10))
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE customers SET email=$1, name=$2, company=$3, phone=$4, address=$5, tags=$6, notes=$7, updated_at=NOW() WHERE id=$8`,
+		nullIfEmpty(email), nullIfEmpty(name), nullIfEmpty(company), nullIfEmpty(phone), nullIfEmpty(address), nullIfEmpty(tags), nullIfEmpty(notes), id,
+	); err != nil {
+		// A duplicate email trips the unique constraint; report it rather than 500.
+		log.Printf("update customer error: %v", err)
+		http.Redirect(w, r, viewURL+"&saved=err", http.StatusSeeOther)
+		return
+	}
+
+	http.Redirect(w, r, viewURL+"&saved=1", http.StatusSeeOther)
+}
+
+func mapCustomerFlash(code string) *passwordFlash {
+	switch code {
+	case "1":
+		return &passwordFlash{Message: "Customer saved.", Kind: "success"}
+	case "err":
+		return &passwordFlash{Message: "Could not save — is that email already used by another customer?", Kind: "error"}
+	default:
+		return nil
+	}
 }
 
 func formatJSON(raw json.RawMessage) string {

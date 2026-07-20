@@ -7,6 +7,7 @@ Yet another form handler. FastCGI Form Collector which turns submissions into to
   with an optional TCP FastCGI listener via `-tcp <port>`.
 - **PostgreSQL persistence** with JSONB storage for arbitrary form fields and request metadata (real source IP, the client-supplied `X-Forwarded-For` header, user agent, referrer, timestamp). Both the trusted peer address and the forwarded header are stored as-is — the forwarded value is attacker-controllable, so treat it accordingly when reviewing.
 - **Admin dashboard** with login (bcrypt passwords stored in the database), pagination, status management (`new`, `in_progress`, `complete`, `archived`), CSRF protection, hardened cookies, and nicely formatted JSON payloads.
+- **Customer records (CRM)**: submissions are linked to customer/contact records keyed on email, with a searchable customer directory and per-customer submission history in the admin UI.
 - **Built-in throttling** that blocks abusive IPs (over 4 submissions per minute) for 24 hours and temporarily pauses all submissions for 5 minutes when a burst of distinct IPs appears.
 - **Request caps** to protect the FastCGI endpoint from floods (64KB body and 200-field limit, with an adjustable upload budget on top).
 - **Optional file capture** that, when enabled, stores an uploaded file inside the `_ftd` chroot with a unique timestamped name and records both the stored path and the original filename alongside the submission JSON. File uploads are disabled by default.
@@ -95,6 +96,15 @@ directly.
 - Uploads are **disabled by default**. Set `MAX_UPLOAD_MB` to a positive integer to allow a single file upload per submission, capped to that size and counted against the FastCGI body budget.
 - Uploaded files are stored under `uploads/` inside the `_ftd` chroot (created on demand) using names like `ftd.20240101T000000Z,89abcd12`. The stored path lives in the `file_path` column, and both the stored name and any client-supplied original name are injected into the `form_data` JSON as `_upload_stored_filename` and `_upload_original_filename`. When a write fails, the row keeps `Failed Upload (<status code>)` in `file_path` and in `_upload_stored_filename` so reviewers can see the error.
 - The lightweight sample `sample_form.html` remains text-only; use `sample_form_upload.html` for an upload-capable example (with `enctype="multipart/form-data"`).
+
+## Customers (CRM)
+Every submission is associated with a **customer** record. On intake the handler looks for contact fields in the posted form (case-insensitive) — `email`/`e-mail`/`email_address`, `name` or `first_name`+`last_name`, `company`, `phone` — and, when a plausible email is present, creates or updates a customer keyed on that email (email is lower-cased for stable dedup). The submission is linked to that customer via `submissions.customer_id`; submissions without a usable email are stored unlinked.
+
+The admin dashboard has a **Customers** tab with:
+- a searchable, paginated contact list (search matches email, name, company, phone);
+- a per-customer page showing the editable profile (name, email, company, phone, address, tags, notes) and the full history of that customer's submissions.
+
+Editing a customer's email to one already used by another customer is rejected (emails are unique).
 
 ## Status workflow
 Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete`, or `archived`. Completed submissions remain available but collapse into the lower section; archived items stay out of the main dashboard and live in the dedicated Archived view with its own pagination. A bulk "Archive completed" control is available on the Active dashboard to sweep all completed rows into the archived view at once. Each submission also supports an internal reviewer comment field; it can be edited alongside status updates and is rendered in a muted, read-only state when the submission is archived.

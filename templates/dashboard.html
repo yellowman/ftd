@@ -17,6 +17,7 @@
         <nav class="tabs">
           <a href="{{.AdminPrefix}}/" class="{{if not .IsArchived}}active{{end}}">Active</a>
           <a href="{{.AdminPrefix}}/archived" class="{{if .IsArchived}}active{{end}}">Archived</a>
+          <a href="{{.AdminPrefix}}/customers">Customers</a>
         </nav>
         {{if not .IsArchived}}
         <form method="get" action="{{.AdminPrefix}}/" class="filter">

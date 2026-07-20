@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Customers</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>Customers</h1>
+        <p class="lede">Contacts built from form submissions. Search, review history, and keep records current.</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
+          <a href="{{.AdminPrefix}}/customers" class="active">Customers</a>
+        </nav>
+        <form method="get" action="{{.AdminPrefix}}/customers" class="filter">
+          <label>Search
+            <input type="text" name="q" value="{{.Query}}" placeholder="email, name, company…">
+          </label>
+          <button type="submit">Search</button>
+        </form>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    <section class="customers">
+      {{if not .Customers}}
+      <p>No customers found{{if .Query}} for “{{.Query}}”{{end}}.</p>
+      {{else}}
+      <table class="table">
+        <thead>
+          <tr><th>Name</th><th>Email</th><th>Company</th><th>Phone</th><th>Subs</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {{range .Customers}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/customers/view?id={{.ID}}">{{if .Name.Valid}}{{.Name.String}}{{else}}—{{end}}</a></td>
+            <td>{{.Email.String}}</td>
+            <td>{{.Company.String}}</td>
+            <td>{{.Phone.String}}</td>
+            <td>{{.SubmissionCount}}</td>
+            <td>{{.UpdatedAt.Format "2006-01-02"}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{end}}
+    </section>
+
+    <footer class="pagination">
+      {{if gt .Page 1}}
+      <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Query}}&q={{.Query}}{{end}}">Previous</a>
+      {{end}}
+      <span>Page {{.Page}}</span>
+      {{if lt (multiply .Page .PageSize) .Total}}
+      <a href="{{.Path}}?page={{add .Page 1}}{{if .Query}}&q={{.Query}}{{end}}">Next</a>
+      {{end}}
+    </footer>
+  </div>
+</body>
+</html>
