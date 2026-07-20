@@ -388,7 +388,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -447,6 +447,8 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/customers/clear-bounce"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerClearBounce))))
 	mux.Handle(s.adminPath("/customers/export"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerExport))))
 	mux.Handle(s.adminPath("/customers/import"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerImport))))
+	mux.Handle(s.adminPath("/customers/tag"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerTag))))
+	mux.Handle(s.adminPath("/tags"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleTags))))
 	mux.Handle(s.adminPath("/users"), users)
 	mux.Handle(s.adminPath("/lists"), lists)
 	mux.Handle(s.adminPath("/lists/view"), listView)
@@ -556,8 +558,14 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	ref := r.Referer()
 
 	// Associate the submission with a customer record (created or updated from
-	// the form's contact fields) so intake feeds the CRM.
+	// the form's contact fields) so intake feeds the CRM. Forms may self-classify
+	// via a (usually hidden) "tags" field; those tags are applied to the customer.
 	customerID := s.linkCustomer(r.Context(), payload)
+	if customerID.Valid {
+		if tags := extractFormTags(payload); len(tags) > 0 {
+			s.applyTags(r.Context(), customerID.Int64, tags, "form")
+		}
+	}
 
 	_, err = s.db.Exec(
 		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -1567,19 +1575,31 @@ func extractContact(payload map[string]interface{}) (email, name, company, phone
 	return email, name, company, phone, address
 }
 
-func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int) ([]Customer, int, error) {
+func (s *server) listCustomers(ctx context.Context, q, tagFilter string, page, pageSize int) ([]Customer, int, error) {
 	offset := (page - 1) * pageSize
 
-	where := ""
+	clauses := []string{}
 	filterArgs := []interface{}{}
 	if q != "" {
-		where = " WHERE (c.email ILIKE $1 OR c.name ILIKE $1 OR c.company ILIKE $1 OR c.phone ILIKE $1)"
 		filterArgs = append(filterArgs, "%"+q+"%")
+		p := "$" + strconv.Itoa(len(filterArgs))
+		clauses = append(clauses, `(c.email ILIKE `+p+` OR c.name ILIKE `+p+` OR c.company ILIKE `+p+` OR c.phone ILIKE `+p+`
+		    OR EXISTS (SELECT 1 FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = c.id AND t.name ILIKE `+p+`))`)
+	}
+	if tagFilter != "" {
+		filterArgs = append(filterArgs, tagFilter)
+		p := "$" + strconv.Itoa(len(filterArgs))
+		clauses = append(clauses, `EXISTS (SELECT 1 FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = c.id AND t.name = `+p+`)`)
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
 	}
 
 	args := append([]interface{}{}, filterArgs...)
 	query := `SELECT c.id, c.email, c.name, c.company, c.phone, c.created_at, c.updated_at, c.unsubscribed_at, c.bounced_at,
-	    (SELECT COUNT(*) FROM submissions s WHERE s.customer_id = c.id) AS submission_count
+	    (SELECT COUNT(*) FROM submissions s WHERE s.customer_id = c.id) AS submission_count,
+	    (SELECT string_agg(t.name, ', ' ORDER BY t.name) FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = c.id) AS tag_names
 	    FROM customers c` + where +
 		" ORDER BY c.updated_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
 	args = append(args, pageSize, offset)
@@ -1593,7 +1613,7 @@ func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int
 	customers := []Customer{}
 	for rows.Next() {
 		var c Customer
-		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt, &c.SubmissionCount); err != nil {
+		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt, &c.SubmissionCount, &c.Tags); err != nil {
 			return nil, 0, err
 		}
 		customers = append(customers, c)
@@ -1614,9 +1634,9 @@ func (s *server) listCustomers(ctx context.Context, q string, page, pageSize int
 func (s *server) getCustomer(ctx context.Context, id int64) (*Customer, []Submission, error) {
 	var c Customer
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, name, company, phone, address, tags, notes, created_at, updated_at, unsubscribed_at, bounced_at
+		`SELECT id, email, name, company, phone, address, notes, created_at, updated_at, unsubscribed_at, bounced_at
 		 FROM customers WHERE id = $1`, id,
-	).Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.Address, &c.Tags, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt)
+	).Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.Address, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil, nil
 	} else if err != nil {
@@ -1667,8 +1687,8 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 		}
 		var id int64
 		err := s.db.QueryRowContext(r.Context(),
-			`INSERT INTO customers (email, name, company, phone, address, tags)
-			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''))
+			`INSERT INTO customers (email, name, company, phone, address)
+			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''))
 			 ON CONFLICT (email) DO UPDATE SET updated_at = NOW()
 			 RETURNING id`,
 			email,
@@ -1676,12 +1696,14 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 			strings.TrimSpace(r.FormValue("company")),
 			strings.TrimSpace(r.FormValue("phone")),
 			strings.TrimSpace(r.FormValue("address")),
-			strings.TrimSpace(r.FormValue("tags")),
 		).Scan(&id)
 		if err != nil {
 			log.Printf("create customer error: %v", err)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
+		}
+		if tags := splitTagList(r.FormValue("tags")); len(tags) > 0 {
+			s.applyTags(r.Context(), id, tags, "manual")
 		}
 		http.Redirect(w, r, s.adminPath("/customers/view?id="+strconv.FormatInt(id, 10)), http.StatusSeeOther)
 		return
@@ -1697,10 +1719,18 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 		page = 1
 	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	tagFilter := strings.TrimSpace(r.URL.Query().Get("tag"))
 
-	customers, total, err := s.listCustomers(r.Context(), q, page, defaultItemsPerPage)
+	customers, total, err := s.listCustomers(r.Context(), q, tagFilter, page, defaultItemsPerPage)
 	if err != nil {
 		log.Printf("list customers error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	allTags, err := s.listTagNames(r.Context())
+	if err != nil {
+		log.Printf("list tags error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -1716,6 +1746,8 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"Customers":   customers,
 		"Query":       q,
+		"TagFilter":   tagFilter,
+		"AllTags":     allTags,
 		"Page":        page,
 		"Total":       total,
 		"PageSize":    defaultItemsPerPage,
@@ -1757,10 +1789,34 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	chips, err := s.customerTagChips(r.Context(), id)
+	if err != nil {
+		log.Printf("tag chips error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	allTags, err := s.listTagNames(r.Context())
+	if err != nil {
+		log.Printf("list tags error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	clicks, err := s.customerClickHistory(r.Context(), id)
+	if err != nil {
+		log.Printf("click history error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	data := map[string]interface{}{
 		"Customer":    customer,
 		"Submissions": subs,
 		"Timeline":    timeline,
+		"TagChips":    chips,
+		"AllTags":     allTags,
+		"Clicks":      clicks,
 		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
 		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
 		"AdminPrefix": s.adminPrefix,
@@ -1797,10 +1853,9 @@ func (s *server) handleCustomerUpdate(w http.ResponseWriter, r *http.Request) {
 	company := strings.TrimSpace(r.FormValue("company"))
 	phone := strings.TrimSpace(r.FormValue("phone"))
 	address := strings.TrimSpace(r.FormValue("address"))
-	tags := strings.TrimSpace(r.FormValue("tags"))
 	notes := strings.TrimSpace(r.FormValue("notes"))
 
-	for _, field := range []string{name, company, phone, tags} {
+	for _, field := range []string{name, company, phone} {
 		if len(field) > 500 {
 			http.Error(w, "field too long", http.StatusRequestEntityTooLarge)
 			return
@@ -1813,8 +1868,8 @@ func (s *server) handleCustomerUpdate(w http.ResponseWriter, r *http.Request) {
 
 	viewURL := s.adminPath("/customers/view?id=" + strconv.FormatInt(id, 10))
 	if _, err := s.db.ExecContext(r.Context(),
-		`UPDATE customers SET email=$1, name=$2, company=$3, phone=$4, address=$5, tags=$6, notes=$7, updated_at=NOW() WHERE id=$8`,
-		nullIfEmpty(email), nullIfEmpty(name), nullIfEmpty(company), nullIfEmpty(phone), nullIfEmpty(address), nullIfEmpty(tags), nullIfEmpty(notes), id,
+		`UPDATE customers SET email=$1, name=$2, company=$3, phone=$4, address=$5, notes=$6, updated_at=NOW() WHERE id=$7`,
+		nullIfEmpty(email), nullIfEmpty(name), nullIfEmpty(company), nullIfEmpty(phone), nullIfEmpty(address), nullIfEmpty(notes), id,
 	); err != nil {
 		// A duplicate email trips the unique constraint; report it rather than 500.
 		log.Printf("update customer error: %v", err)

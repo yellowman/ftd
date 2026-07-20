@@ -11,7 +11,7 @@
       <div>
         <p class="eyebrow">ftd · CRM</p>
         <h1>{{.Mailing.Subject}}</h1>
-        <p class="lede">Mailing #{{.Mailing.ID}} · <span class="status-pill {{.Mailing.Status}}">{{.Mailing.Status}}</span>{{if .Mailing.SentAt.Valid}} · sent {{.Mailing.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}{{if .Mailing.CreatedBy.Valid}} · by {{.Mailing.CreatedBy.String}}{{end}}</p>
+        <p class="lede">Mailing #{{.Mailing.ID}} · <span class="status-pill {{.Mailing.Status}}">{{.Mailing.Status}}</span>{{if .Mailing.SentAt.Valid}} · sent {{.Mailing.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}{{if .Mailing.CreatedBy.Valid}} · by {{.Mailing.CreatedBy.String}}{{end}}{{if .Mailing.Tags.Valid}} · tags: {{.Mailing.Tags.String}}{{end}}</p>
       </div>
       <div class="actions">
         <nav class="tabs">
@@ -46,6 +46,7 @@
             {{end}}
           </select>
         </label>
+        <label>Tags<input type="text" name="tags" value="{{.Mailing.Tags.String}}" placeholder="widgets, sale" title="Customers who click any link in this mailing inherit these tags"></label>
         <label class="full">Body (HTML)
           <textarea name="body_html" rows="14" placeholder="&lt;p&gt;Hello!&lt;/p&gt;">{{.Mailing.BodyHTML}}</textarea>
         </label>

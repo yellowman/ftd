@@ -300,9 +300,17 @@ func (s *server) handleListView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allTags, err := s.listTagNames(r.Context())
+	if err != nil {
+		log.Printf("list tags error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	renderTemplate(w, "templates/list.html", map[string]interface{}{
 		"List":        list,
 		"Members":     members,
+		"AllTags":     allTags,
 		"Flash":       msgs,
 		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
 		"AdminPrefix": s.adminPrefix,
@@ -343,15 +351,16 @@ func (s *server) applyListMemberAction(r *http.Request, listID int64) *passwordF
 		}
 		return &passwordFlash{Message: "Member removed.", Kind: "success"}
 	case "addtag":
-		// Segment tool: add every customer whose tags contain the given text.
-		tag := strings.TrimSpace(r.FormValue("tag"))
-		if tag == "" || len(tag) > 200 {
-			return &passwordFlash{Message: "Enter a tag to match.", Kind: "error"}
+		// Segment tool: add every customer carrying the given tag.
+		tag := normalizeTagName(r.FormValue("tag"))
+		if tag == "" {
+			return &passwordFlash{Message: "Pick a tag.", Kind: "error"}
 		}
 		res, err := s.db.ExecContext(r.Context(),
 			`INSERT INTO list_members (list_id, customer_id)
-			 SELECT $1, id FROM customers WHERE tags ILIKE $2
-			 ON CONFLICT DO NOTHING`, listID, "%"+tag+"%")
+			 SELECT $1::integer, ct.customer_id FROM customer_tags ct
+			 JOIN tags t ON t.id = ct.tag_id WHERE t.name = $2
+			 ON CONFLICT DO NOTHING`, listID, tag)
 		if err != nil {
 			log.Printf("addtag error: %v", err)
 			return &passwordFlash{Message: "Unable to add members right now", Kind: "error"}
@@ -391,6 +400,7 @@ type Mailing struct {
 	CreatedBy sql.NullString
 	CreatedAt time.Time
 	SentAt    sql.NullTime
+	Tags      sql.NullString
 	Total     int
 	Sent      int
 	Failed    int
@@ -510,9 +520,10 @@ func (s *server) renderMailings(w http.ResponseWriter, r *http.Request, flash *p
 func (s *server) loadMailing(ctx context.Context, id int64) (*Mailing, error) {
 	var m Mailing
 	err := s.db.QueryRowContext(ctx,
-		`SELECT m.id, m.subject, m.body_html, m.list_id, m.status, m.created_by, m.created_at, m.sent_at, l.name
+		`SELECT m.id, m.subject, m.body_html, m.list_id, m.status, m.created_by, m.created_at, m.sent_at, l.name,
+		    (SELECT string_agg(t.name, ', ' ORDER BY t.name) FROM mailing_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.mailing_id = m.id)
 		 FROM mailings m LEFT JOIN lists l ON l.id = m.list_id WHERE m.id=$1`, id,
-	).Scan(&m.ID, &m.Subject, &m.BodyHTML, &m.ListID, &m.Status, &m.CreatedBy, &m.CreatedAt, &m.SentAt, &m.ListName)
+	).Scan(&m.ID, &m.Subject, &m.BodyHTML, &m.ListID, &m.Status, &m.CreatedBy, &m.CreatedAt, &m.SentAt, &m.ListName, &m.Tags)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
@@ -719,6 +730,27 @@ func (s *server) handleMailingUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, view+"&msg=notdraft", http.StatusSeeOther)
 		return
 	}
+
+	// Replace the mailing's tag set (propagated to customers who click).
+	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM mailing_tags WHERE mailing_id=$1`, id); err != nil {
+		log.Printf("mailing tags clear error: %v", err)
+	}
+	for _, name := range splitTagList(r.FormValue("tags")) {
+		var tagID int64
+		if err := s.db.QueryRowContext(r.Context(),
+			`INSERT INTO tags (name) VALUES ($1)
+			 ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+			 RETURNING id`, name).Scan(&tagID); err != nil {
+			log.Printf("mailing tag upsert error: %v", err)
+			continue
+		}
+		if _, err := s.db.ExecContext(r.Context(),
+			`INSERT INTO mailing_tags (mailing_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			id, tagID); err != nil {
+			log.Printf("mailing tag link error: %v", err)
+		}
+	}
+
 	http.Redirect(w, r, view+"&msg=saved", http.StatusSeeOther)
 }
 
@@ -1044,12 +1076,13 @@ func (s *server) handleTrackClick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var url string
-	var recipientID int64
+	var recipientID, mailingID int64
+	var customerID sql.NullInt64
 	dbErr := s.db.QueryRowContext(r.Context(),
-		`SELECT ml.url, mr.id FROM mailing_recipients mr
+		`SELECT ml.url, mr.id, mr.mailing_id, mr.customer_id FROM mailing_recipients mr
 		 JOIN mailing_links ml ON ml.mailing_id = mr.mailing_id
 		 WHERE mr.token = $1 AND ml.id = $2`, token, linkID,
-	).Scan(&url, &recipientID)
+	).Scan(&url, &recipientID, &mailingID, &customerID)
 	if dbErr == sql.ErrNoRows {
 		http.Error(w, "unknown link", http.StatusNotFound)
 		return
@@ -1070,6 +1103,25 @@ func (s *server) handleTrackClick(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.db.ExecContext(r.Context(),
 		`UPDATE mailing_links SET click_count = click_count + 1 WHERE id = $1`, linkID); err != nil {
 		log.Printf("track link update error: %v", err)
+	}
+
+	// Per-recipient x per-link matrix (interest profiles + future scoring).
+	if _, err := s.db.ExecContext(r.Context(),
+		`INSERT INTO mailing_clicks (recipient_id, link_id) VALUES ($1, $2)
+		 ON CONFLICT (recipient_id, link_id) DO UPDATE SET
+		     click_count = mailing_clicks.click_count + 1,
+		     last_clicked_at = NOW()`, recipientID, linkID); err != nil {
+		log.Printf("click matrix error: %v", err)
+	}
+
+	// Clicking inherits the mailing's tags: interest declared by behavior.
+	if customerID.Valid {
+		if _, err := s.db.ExecContext(r.Context(),
+			`INSERT INTO customer_tags (customer_id, tag_id, source)
+			 SELECT $1, mt.tag_id, 'click' FROM mailing_tags mt WHERE mt.mailing_id = $2
+			 ON CONFLICT DO NOTHING`, customerID.Int64, mailingID); err != nil {
+			log.Printf("click tag propagation error: %v", err)
+		}
 	}
 
 	http.Redirect(w, r, url, http.StatusSeeOther)
@@ -1338,7 +1390,9 @@ func (s *server) handleCustomerExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.QueryContext(r.Context(),
-		`SELECT email, name, company, phone, address, tags, notes, created_at,
+		`SELECT email, name, company, phone, address,
+		     (SELECT string_agg(t.name, ',' ORDER BY t.name) FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = customers.id),
+		     notes, created_at,
 		     unsubscribed_at IS NOT NULL, bounced_at IS NOT NULL
 		 FROM customers ORDER BY id`)
 	if err != nil {
@@ -1467,22 +1521,26 @@ func (s *server) handleCustomerImport(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
-		if _, err := s.db.ExecContext(r.Context(),
-			`INSERT INTO customers (email, name, company, phone, address, tags, notes)
-			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''), NULLIF($7,''))
+		var custID int64
+		if err := s.db.QueryRowContext(r.Context(),
+			`INSERT INTO customers (email, name, company, phone, address, notes)
+			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''), NULLIF($6,''))
 			 ON CONFLICT (email) DO UPDATE SET
 			     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
 			     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
 			     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
 			     address = COALESCE(NULLIF(EXCLUDED.address, ''), customers.address),
-			     tags = COALESCE(NULLIF(EXCLUDED.tags, ''), customers.tags),
 			     notes = COALESCE(NULLIF(EXCLUDED.notes, ''), customers.notes),
-			     updated_at = NOW()`,
+			     updated_at = NOW()
+			 RETURNING id`,
 			email, field(rec, "name"), field(rec, "company"), field(rec, "phone"),
-			field(rec, "address"), field(rec, "tags"), field(rec, "notes")); err != nil {
+			field(rec, "address"), field(rec, "notes")).Scan(&custID); err != nil {
 			log.Printf("import row error for %s: %v", email, err)
 			skipped++
 			continue
+		}
+		if tags := splitTagList(field(rec, "tags")); len(tags) > 0 {
+			s.applyTags(r.Context(), custID, tags, "import")
 		}
 		imported++
 	}
@@ -1490,4 +1548,302 @@ func (s *server) handleCustomerImport(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r,
 		s.adminPath("/customers?imported="+strconv.Itoa(imported)+"&skipped="+strconv.Itoa(skipped)),
 		http.StatusSeeOther)
+}
+
+// ---- Tags ------------------------------------------------------------------
+
+type TagChip struct {
+	Name   string
+	Source string
+}
+
+type TagInfo struct {
+	ID            int64
+	Name          string
+	CustomerCount int
+	CreatedAt     time.Time
+}
+
+// tagNameRe constrains normalized tag names: lowercase alphanumerics with
+// single spaces, dashes, underscores or dots between; 1-50 chars.
+var tagNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9 ._-]{0,49}$`)
+
+// normalizeTagName lowercases, trims, and collapses whitespace; returns ""
+// when the result is not a valid tag name.
+func normalizeTagName(raw string) string {
+	name := strings.ToLower(strings.Join(strings.Fields(raw), " "))
+	if !tagNameRe.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
+// splitTagList turns a comma-separated string into normalized tag names,
+// dropping invalid entries and duplicates.
+func splitTagList(raw string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		name := normalizeTagName(part)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
+const maxTagsPerApply = 10
+
+// extractFormTags pulls self-classification tags from a submitted form's
+// "tags" field (string or repeated values), normalized and capped.
+func extractFormTags(payload map[string]interface{}) []string {
+	raw, ok := payload["tags"]
+	if !ok {
+		return nil
+	}
+	var parts []string
+	switch v := raw.(type) {
+	case string:
+		parts = strings.Split(v, ",")
+	case []string:
+		parts = v
+	case []interface{}:
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				parts = append(parts, str)
+			}
+		}
+	default:
+		return nil
+	}
+	tags := splitTagList(strings.Join(parts, ","))
+	if len(tags) > maxTagsPerApply {
+		tags = tags[:maxTagsPerApply]
+	}
+	return tags
+}
+
+// applyTags associates tags (created if missing) with a customer, recording how
+// the association was made. Existing associations are left untouched, so a
+// manual tag is not downgraded to source=form by a later submission.
+func (s *server) applyTags(ctx context.Context, customerID int64, names []string, source string) {
+	if len(names) > maxTagsPerApply {
+		names = names[:maxTagsPerApply]
+	}
+	for _, name := range names {
+		var tagID int64
+		err := s.db.QueryRowContext(ctx,
+			`INSERT INTO tags (name) VALUES ($1)
+			 ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+			 RETURNING id`, name).Scan(&tagID)
+		if err != nil {
+			log.Printf("tag upsert error for %q: %v", name, err)
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO customer_tags (customer_id, tag_id, source) VALUES ($1, $2, $3)
+			 ON CONFLICT DO NOTHING`, customerID, tagID, source); err != nil {
+			log.Printf("customer tag error for %q: %v", name, err)
+		}
+	}
+}
+
+func (s *server) listTagNames(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM tags ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := []string{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
+func (s *server) customerTagChips(ctx context.Context, customerID int64) ([]TagChip, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.name, ct.source FROM customer_tags ct
+		 JOIN tags t ON t.id = ct.tag_id
+		 WHERE ct.customer_id = $1 ORDER BY t.name`, customerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	chips := []TagChip{}
+	for rows.Next() {
+		var c TagChip
+		if err := rows.Scan(&c.Name, &c.Source); err != nil {
+			return nil, err
+		}
+		chips = append(chips, c)
+	}
+	return chips, rows.Err()
+}
+
+// handleCustomerTag adds or removes a single tag on a customer (chip UI).
+func (s *server) handleCustomerTag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	name := normalizeTagName(r.FormValue("tag"))
+	if name == "" {
+		http.Error(w, "invalid tag name", http.StatusBadRequest)
+		return
+	}
+
+	switch r.FormValue("action") {
+	case "add":
+		s.applyTags(r.Context(), id, []string{name}, "manual")
+	case "remove":
+		if _, err := s.db.ExecContext(r.Context(),
+			`DELETE FROM customer_tags WHERE customer_id=$1 AND tag_id=(SELECT id FROM tags WHERE name=$2)`,
+			id, name); err != nil {
+			log.Printf("tag remove error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	default:
+		http.Error(w, "unknown action", http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, s.adminPath("/customers/view?id="+strconv.FormatInt(id, 10)), http.StatusSeeOther)
+}
+
+// handleTags is the tag vocabulary admin page: list with usage counts, delete.
+func (s *server) handleTags(w http.ResponseWriter, r *http.Request) {
+	var flash *passwordFlash
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		switch r.FormValue("action") {
+		case "delete":
+			id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+			if err != nil {
+				http.Error(w, "invalid id", http.StatusBadRequest)
+				return
+			}
+			if _, err := s.db.ExecContext(r.Context(), `DELETE FROM tags WHERE id=$1`, id); err != nil {
+				log.Printf("tag delete error: %v", err)
+				flash = &passwordFlash{Message: "Unable to delete tag right now", Kind: "error"}
+			} else {
+				flash = &passwordFlash{Message: "Tag deleted everywhere.", Kind: "success"}
+			}
+		case "create":
+			name := normalizeTagName(r.FormValue("name"))
+			if name == "" {
+				flash = &passwordFlash{Message: "Tag names are 1-50 chars: lowercase letters, digits, space . _ -", Kind: "error"}
+			} else if _, err := s.db.ExecContext(r.Context(),
+				`INSERT INTO tags (name) VALUES ($1) ON CONFLICT DO NOTHING`, name); err != nil {
+				log.Printf("tag create error: %v", err)
+				flash = &passwordFlash{Message: "Unable to create tag right now", Kind: "error"}
+			} else {
+				flash = &passwordFlash{Message: "Tag “" + name + "” available.", Kind: "success"}
+			}
+		default:
+			http.Error(w, "unknown action", http.StatusBadRequest)
+			return
+		}
+	} else if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := s.db.QueryContext(r.Context(),
+		`SELECT t.id, t.name, t.created_at,
+		    (SELECT COUNT(*) FROM customer_tags ct WHERE ct.tag_id = t.id)
+		 FROM tags t ORDER BY t.name`)
+	if err != nil {
+		log.Printf("tags query error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	tags := []TagInfo{}
+	for rows.Next() {
+		var t TagInfo
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.CustomerCount); err != nil {
+			log.Printf("tags scan error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		tags = append(tags, t)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("tags query error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	renderTemplate(w, "templates/tags.html", map[string]interface{}{
+		"Tags":        tags,
+		"Flash":       flash,
+		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix": s.adminPrefix,
+	})
+}
+
+// ---- Click history ---------------------------------------------------------
+
+type ClickEntry struct {
+	Subject string
+	URL     string
+	Count   int
+	FirstAt time.Time
+	LastAt  time.Time
+}
+
+// customerClickHistory lists which mailing links a customer has clicked —
+// the raw material for interest profiles and future engagement scoring.
+func (s *server) customerClickHistory(ctx context.Context, customerID int64) ([]ClickEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.subject, ml.url, mc.click_count, mc.first_clicked_at, mc.last_clicked_at
+		 FROM mailing_clicks mc
+		 JOIN mailing_recipients mr ON mr.id = mc.recipient_id
+		 JOIN mailing_links ml ON ml.id = mc.link_id
+		 JOIN mailings m ON m.id = mr.mailing_id
+		 WHERE mr.customer_id = $1
+		 ORDER BY mc.last_clicked_at DESC LIMIT 100`, customerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := []ClickEntry{}
+	for rows.Next() {
+		var e ClickEntry
+		if err := rows.Scan(&e.Subject, &e.URL, &e.Count, &e.FirstAt, &e.LastAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }

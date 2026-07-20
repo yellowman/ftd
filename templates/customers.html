@@ -18,15 +18,24 @@
           <a href="{{.AdminPrefix}}/">Active</a>
           <a href="{{.AdminPrefix}}/archived">Archived</a>
           <a href="{{.AdminPrefix}}/customers" class="active">Customers</a>
+          <a href="{{.AdminPrefix}}/tags">Tags</a>
           <a href="{{.AdminPrefix}}/lists">Lists</a>
           <a href="{{.AdminPrefix}}/mailings">Mailings</a>
           <a href="{{.AdminPrefix}}/users">Users</a>
         </nav>
         <form method="get" action="{{.AdminPrefix}}/customers" class="filter">
           <label>Search
-            <input type="text" name="q" value="{{.Query}}" placeholder="email, name, company…">
+            <input type="text" name="q" value="{{.Query}}" placeholder="email, name, company, tag…">
           </label>
-          <button type="submit">Search</button>
+          <label>Tag
+            <select name="tag">
+              <option value="">Any</option>
+              {{range .AllTags}}
+              <option value="{{.}}" {{if eq . $.TagFilter}}selected{{end}}>{{.}}</option>
+              {{end}}
+            </select>
+          </label>
+          <button type="submit">Filter</button>
         </form>
         <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
       </div>
@@ -72,7 +81,7 @@
       {{else}}
       <table class="table">
         <thead>
-          <tr><th>Name</th><th>Email</th><th>Company</th><th>Phone</th><th>Subs</th><th>Status</th><th>Updated</th></tr>
+          <tr><th>Name</th><th>Email</th><th>Company</th><th>Tags</th><th>Subs</th><th>Status</th><th>Updated</th></tr>
         </thead>
         <tbody>
           {{range .Customers}}
@@ -80,7 +89,7 @@
             <td><a href="{{$.AdminPrefix}}/customers/view?id={{.ID}}">{{if .Name.Valid}}{{.Name.String}}{{else}}—{{end}}</a></td>
             <td>{{.Email.String}}</td>
             <td>{{.Company.String}}</td>
-            <td>{{.Phone.String}}</td>
+            <td class="tags-cell">{{.Tags.String}}</td>
             <td>{{.SubmissionCount}}</td>
             <td>
               {{if .UnsubscribedAt.Valid}}<span class="status-pill archived">unsubscribed</span>{{end}}

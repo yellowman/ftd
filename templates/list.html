@@ -49,7 +49,11 @@
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
           <input type="hidden" name="action" value="addtag">
           <input type="hidden" name="id" value="{{.List.ID}}">
-          <label>Tag contains<input type="text" name="tag" placeholder="vip" required></label>
+          <label>Tag
+            <select name="tag" required>
+              {{range .AllTags}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+          </label>
           <button type="submit">Add tagged</button>
         </form>
         <form method="post" action="{{.AdminPrefix}}/lists/view">

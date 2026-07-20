@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Lists</title>
+  <title>Tags</title>
   <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
 </head>
 <body>
@@ -10,15 +10,15 @@
     <header class="header">
       <div>
         <p class="eyebrow">ftd · CRM</p>
-        <h1>Mailing Lists</h1>
-        <p class="lede">Group customers into lists to target mailings.</p>
+        <h1>Tags</h1>
+        <p class="lede">The interest vocabulary. Tags come from manual edits, form self-classification, clicked mailing links, and CSV imports.</p>
       </div>
       <div class="actions">
         <nav class="tabs">
           <a href="{{.AdminPrefix}}/">Active</a>
           <a href="{{.AdminPrefix}}/customers">Customers</a>
-          <a href="{{.AdminPrefix}}/tags">Tags</a>
-          <a href="{{.AdminPrefix}}/lists" class="active">Lists</a>
+          <a href="{{.AdminPrefix}}/tags" class="active">Tags</a>
+          <a href="{{.AdminPrefix}}/lists">Lists</a>
           <a href="{{.AdminPrefix}}/mailings">Mailings</a>
           <a href="{{.AdminPrefix}}/users">Users</a>
         </nav>
@@ -32,33 +32,31 @@
 
     <section class="password-card">
       <div>
-        <h2>New list</h2>
-        <p>Create a list, then add customers from the list page.</p>
+        <h2>New tag</h2>
+        <p>Pre-create vocabulary so forms and teammates converge on the same names.</p>
       </div>
-      <form method="post" action="{{.AdminPrefix}}/lists">
+      <form method="post" action="{{.AdminPrefix}}/tags">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <input type="hidden" name="action" value="create">
-        <label>Name<input type="text" name="name" required></label>
-        <label>Description<input type="text" name="description"></label>
-        <button type="submit">Create list</button>
+        <label>Name<input type="text" name="name" placeholder="widgets" required></label>
+        <button type="submit">Create tag</button>
       </form>
     </section>
 
     <section class="customers">
-      {{if not .Lists}}
-      <p>No lists yet.</p>
+      {{if not .Tags}}
+      <p>No tags yet. Tag a customer, a mailing, or add a hidden <code>tags</code> field to a form.</p>
       {{else}}
       <table class="table">
-        <thead><tr><th>Name</th><th>Description</th><th>Members</th><th>Created</th><th></th></tr></thead>
+        <thead><tr><th>Tag</th><th>Customers</th><th>Created</th><th></th></tr></thead>
         <tbody>
-          {{range .Lists}}
+          {{range .Tags}}
           <tr>
-            <td><a href="{{$.AdminPrefix}}/lists/view?id={{.ID}}">{{.Name}}</a></td>
-            <td>{{.Description.String}}</td>
-            <td>{{.MemberCount}}</td>
+            <td><a href="{{$.AdminPrefix}}/customers?tag={{.Name}}">{{.Name}}</a></td>
+            <td>{{.CustomerCount}}</td>
             <td>{{.CreatedAt.Format "2006-01-02"}}</td>
             <td>
-              <form method="post" action="{{$.AdminPrefix}}/lists" class="inline-form">
+              <form method="post" action="{{$.AdminPrefix}}/tags" class="inline-form">
                 <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                 <input type="hidden" name="action" value="delete">
                 <input type="hidden" name="id" value="{{.ID}}">

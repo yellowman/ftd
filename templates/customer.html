@@ -40,11 +40,44 @@
         <label>Email<input type="email" name="email" value="{{.Customer.Email.String}}"></label>
         <label>Company<input type="text" name="company" value="{{.Customer.Company.String}}"></label>
         <label>Phone<input type="text" name="phone" value="{{.Customer.Phone.String}}"></label>
-        <label>Tags<input type="text" name="tags" value="{{.Customer.Tags.String}}" placeholder="comma,separated"></label>
         <label class="full">Address<input type="text" name="address" value="{{.Customer.Address.String}}"></label>
         <label class="full">Notes<textarea name="notes" rows="4">{{.Customer.Notes.String}}</textarea></label>
         <button type="submit">Save customer</button>
       </form>
+    </section>
+
+    <section class="password-card">
+      <div>
+        <h2>Interest tags</h2>
+        <p>How this contact is classified. Sources: hand-set, declared by a submitted form, inherited from a clicked mailing link, or CSV import.</p>
+      </div>
+      <div>
+        <div class="chip-row">
+          {{range .TagChips}}
+          <span class="tag-chip src-{{.Source}}" title="source: {{.Source}}">{{.Name}}
+            <form method="post" action="{{$.AdminPrefix}}/customers/tag" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+              <input type="hidden" name="id" value="{{$.Customer.ID}}">
+              <input type="hidden" name="action" value="remove">
+              <input type="hidden" name="tag" value="{{.Name}}">
+              <button type="submit" class="chip-x" aria-label="Remove tag {{.Name}}">×</button>
+            </form>
+          </span>
+          {{else}}
+          <span class="hint">No tags yet.</span>
+          {{end}}
+        </div>
+        <form method="post" action="{{.AdminPrefix}}/customers/tag" class="chip-add">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="id" value="{{.Customer.ID}}">
+          <input type="hidden" name="action" value="add">
+          <input type="text" name="tag" list="all-tags" placeholder="add tag…" required>
+          <datalist id="all-tags">
+            {{range .AllTags}}<option value="{{.}}">{{end}}
+          </datalist>
+          <button type="submit">Add</button>
+        </form>
+      </div>
     </section>
 
     {{if .Customer.BouncedAt.Valid}}
@@ -94,6 +127,25 @@
             <td><span class="status-pill {{if eq .Kind "mailing"}}sent{{else}}new{{end}}">{{.Kind}}</span></td>
             <td class="timeline-body">{{.Body}}</td>
             <td>{{.CreatedBy.String}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+
+    {{if .Clicks}}
+    <section class="customers">
+      <h2>Clicked links</h2>
+      <table class="table">
+        <thead><tr><th>Mailing</th><th>URL</th><th>Clicks</th><th>Last</th></tr></thead>
+        <tbody>
+          {{range .Clicks}}
+          <tr>
+            <td>{{.Subject}}</td>
+            <td class="file-ref">{{.URL}}</td>
+            <td>{{.Count}}</td>
+            <td>{{.LastAt.Format "2006-01-02 15:04"}}</td>
           </tr>
           {{end}}
         </tbody>

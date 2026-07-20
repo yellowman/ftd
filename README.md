@@ -10,6 +10,7 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 - Accepts arbitrary form fields (stored as JSONB) plus request metadata; optional single file upload.
 - Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
+- Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
 - Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
 - Rate limiting: 4 submissions/minute per IP (24h block), global 5-minute pause on bursts of 30+ distinct IPs.
 
@@ -184,12 +185,25 @@ rows upsert by email). Each customer page has the editable profile, an
 activity timeline (notes/calls/emails/meetings + automatic mailing history),
 and their submissions.
 
+**Tags** — the interest system. Tags live in a normalized vocabulary
+(lowercase; manage it on the Tags page) and attach to customers with a
+recorded source, shown as colored chips: **manual** (set by hand on the
+customer page), **form** (a submitted form carried a — usually hidden —
+`tags` field, e.g. `<input type="hidden" name="tags" value="widgets,pricing">`,
+so each form self-classifies its submitters), **click** (the customer clicked
+a link in a mailing that had tags — interest declared by behavior), and
+**import** (CSV). Filter the directory by tag, click a tag on the Tags page to
+see its customers, and use the list segment tool to turn a tag into a mailing
+audience. Each customer page also lists exactly which mailing links they
+clicked, when, and how often.
+
 **Users** — the schema seeds `admin` / `change-me`. Add your team on the Users
 page; the dashboard password form changes the logged-in user's password.
 
 **Lists & mailings** — group customers into lists by email, or bulk-add by tag
-match / recent submitters. Compose an HTML draft, pick a list (or all
-customers), test-send it to yourself, then send. Mail goes out over the SMTP
+/ recent submitters. Compose an HTML draft, pick a list (or all customers),
+optionally tag the mailing (clickers inherit its tags), test-send it to
+yourself, then send. Mail goes out over the SMTP
 relay in the background; the mailing page shows per-recipient delivery, opens,
 clicks, and per-link click totals. Every message carries an unsubscribe link
 and `List-Unsubscribe` header (when `PUBLIC_BASE_URL` is set); unsubscribed

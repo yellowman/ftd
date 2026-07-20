@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS customers (
     company TEXT,
     phone TEXT,
     address TEXT,
-    tags TEXT,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -112,6 +111,65 @@ CREATE TABLE IF NOT EXISTS activities (
 );
 
 CREATE INDEX IF NOT EXISTS activities_customer_idx ON activities (customer_id, created_at DESC);
+
+-- Normalized tag vocabulary. Tag names are stored lowercase; customer_tags.source
+-- records how the association was made (manually, declared by a submitted form,
+-- inherited from a clicked mailing link, or CSV import).
+CREATE TABLE IF NOT EXISTS tags (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS customer_tags (
+    customer_id INTEGER NOT NULL REFERENCES customers (id) ON DELETE CASCADE,
+    tag_id INTEGER NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+    source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','form','click','import')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (customer_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS customer_tags_tag_idx ON customer_tags (tag_id);
+
+-- Tags on a mailing propagate to customers who click any of its links.
+CREATE TABLE IF NOT EXISTS mailing_tags (
+    mailing_id INTEGER NOT NULL REFERENCES mailings (id) ON DELETE CASCADE,
+    tag_id INTEGER NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+    PRIMARY KEY (mailing_id, tag_id)
+);
+
+-- Per-recipient x per-link click matrix: who clicked which link, when, how often.
+-- Kept at this granularity so engagement scoring can be layered on later.
+CREATE TABLE IF NOT EXISTS mailing_clicks (
+    recipient_id INTEGER NOT NULL REFERENCES mailing_recipients (id) ON DELETE CASCADE,
+    link_id INTEGER NOT NULL REFERENCES mailing_links (id) ON DELETE CASCADE,
+    first_clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    click_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (recipient_id, link_id)
+);
+
+-- One-time migration: convert the old customers.tags comma-string column into
+-- the normalized tables, then drop it. Safe to re-run (the column is gone).
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'customers' AND column_name = 'tags') THEN
+        INSERT INTO tags (name)
+            SELECT DISTINCT lower(trim(t.name))
+            FROM customers c
+            CROSS JOIN LATERAL unnest(string_to_array(c.tags, ',')) AS t(name)
+            WHERE trim(t.name) <> ''
+            ON CONFLICT (name) DO NOTHING;
+        INSERT INTO customer_tags (customer_id, tag_id, source)
+            SELECT DISTINCT c.id, tg.id, 'manual'
+            FROM customers c
+            CROSS JOIN LATERAL unnest(string_to_array(c.tags, ',')) AS t(name)
+            JOIN tags tg ON tg.name = lower(trim(t.name))
+            WHERE trim(t.name) <> ''
+            ON CONFLICT DO NOTHING;
+        ALTER TABLE customers DROP COLUMN tags;
+    END IF;
+END $$;
 
 -- Link submissions to customers once the customers table exists. Wrapped so the
 -- script stays idempotent (re-running does not error if the constraint is set).
