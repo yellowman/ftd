@@ -967,6 +967,51 @@ func isHardSMTPError(err error) bool {
 	return false
 }
 
+// resumeStalledMailings restarts delivery for mailings left in 'sending' by a
+// crash, restart, or deploy. The worker only processes recipients still in
+// 'pending', so resuming is idempotent: already-delivered recipients are not
+// mailed twice. A 'sending' mailing with no recipient rows at all crashed
+// between claim and enqueue and is finalized as failed (the draft mutex has
+// already fired, so it could never complete otherwise).
+func (s *server) resumeStalledMailings(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.id,
+		    (SELECT COUNT(*) FROM mailing_recipients mr WHERE mr.mailing_id = m.id),
+		    (SELECT COUNT(*) FROM mailing_recipients mr WHERE mr.mailing_id = m.id AND mr.status = 'pending')
+		 FROM mailings m WHERE m.status = 'sending'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type stalled struct {
+		id             int64
+		total, pending int
+	}
+	found := []stalled{}
+	for rows.Next() {
+		var st stalled
+		if err := rows.Scan(&st.id, &st.total, &st.pending); err != nil {
+			return err
+		}
+		found = append(found, st)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, st := range found {
+		if st.total == 0 {
+			log.Printf("mailing %d: stuck in sending with no recipients; marking failed", st.id)
+			s.markMailingFailed(ctx, st.id)
+			continue
+		}
+		log.Printf("mailing %d: resuming delivery (%d of %d recipients pending)", st.id, st.pending, st.total)
+		go s.runMailingSend(st.id)
+	}
+	return nil
+}
+
 // runMailingSend delivers a mailing's pending recipients one message at a time
 // and finalizes the mailing status. It runs in the background after send is
 // requested; progress is visible in the mailing view as rows update.
@@ -1061,6 +1106,57 @@ func (s *server) runMailingSend(id int64) {
 	log.Printf("mailing %d: finished (%d sent, %d failed)", id, sent, failed)
 }
 
+// emailLayoutTop/Bottom form the bulletproof table skeleton wrapped around the
+// composed body at send (and preview) time: XHTML+MSO namespaces, an Outlook
+// DPI fix, a ghost table for Outlook's renderer (which ignores max-width), and
+// a centered 600px presentation table with fonts inlined on the td. Authors
+// compose only the content; layout survival in Outlook/Gmail/etc. is ftd's job.
+const emailLayoutTop = `<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="x-apple-disable-message-reformatting">
+<!--[if mso]>
+<noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript>
+<![endif]-->
+<style>
+  body, table, td { font-family: Arial, Helvetica, sans-serif !important; }
+  table { border-collapse: collapse; }
+  img { border: 0; line-height: 100%; outline: none; text-decoration: none; max-width: 100%; height: auto; }
+</style>
+</head>
+<body style="margin:0;padding:0;background-color:#ececec;">
+<center role="article" aria-roledescription="email" style="width:100%;background-color:#ececec;">
+<!--[if mso]>
+<table role="presentation" width="600" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td>
+<![endif]-->
+<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;background-color:#ffffff;">
+<tr><td style="padding:28px 32px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a;">
+`
+
+const emailLayoutBottom = `
+</td></tr>
+</table>
+<!--[if mso]>
+</td></tr></table>
+<![endif]-->
+</center>
+</body>
+</html>`
+
+// wrapEmailLayout wraps composed content in the table skeleton. Bodies that are
+// already full documents (a pasted "<html"/doctype) are passed through
+// untouched as the power-user escape hatch.
+func wrapEmailLayout(body string) string {
+	probe := strings.ToLower(body)
+	if strings.Contains(probe, "<html") || strings.Contains(probe, "<!doctype") {
+		return body
+	}
+	return emailLayoutTop + body + emailLayoutBottom
+}
+
 // buildMessage assembles the RFC 5322 message for one recipient as
 // multipart/alternative: an auto-generated text/plain rendition first (for
 // text-only clients), then the quoted-printable HTML with links rewritten
@@ -1092,6 +1188,7 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	if openURL != "" {
 		htmlBody += "\n<img src=\"" + openURL + "\" width=\"1\" height=\"1\" alt=\"\">"
 	}
+	htmlBody = wrapEmailLayout(htmlBody)
 
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "From: %s\r\n", s.mailFrom)
@@ -1272,8 +1369,9 @@ func (s *server) handleTrackUnsub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var customerID sql.NullInt64
+	var email string
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT customer_id FROM mailing_recipients WHERE token=$1`, token).Scan(&customerID)
+		`SELECT customer_id, email FROM mailing_recipients WHERE token=$1`, token).Scan(&customerID, &email)
 	if err == sql.ErrNoRows {
 		http.Error(w, "invalid token", http.StatusNotFound)
 		return
@@ -1283,6 +1381,10 @@ func (s *server) handleTrackUnsub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Suppress by customer link when present, and always by the recipient's
+	// email as well: the row's customer_id may be NULL (customer deleted and
+	// possibly re-created since), and the success page below must only be
+	// shown if the address really cannot receive further list mail.
 	if customerID.Valid {
 		if _, err := s.db.ExecContext(r.Context(),
 			`UPDATE customers SET unsubscribed_at = COALESCE(unsubscribed_at, NOW()) WHERE id=$1`,
@@ -1291,6 +1393,13 @@ func (s *server) handleTrackUnsub(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
+	}
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE customers SET unsubscribed_at = COALESCE(unsubscribed_at, NOW()) WHERE email=$1`,
+		strings.ToLower(email)); err != nil {
+		log.Printf("unsub update error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -2122,31 +2231,12 @@ func (s *server) handleMediaServe(w http.ResponseWriter, r *http.Request) {
 
 // ---- Preview ---------------------------------------------------------------
 
-const previewShell = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Preview</title>
-<style>
-  body { margin: 0; background: #e9e9e9; font-family: Arial, Helvetica, sans-serif; }
-  .mail { max-width: 600px; margin: 24px auto; background: #ffffff; padding: 24px 28px;
-          border: 1px solid #d4d4d4; color: #1a1a1a; line-height: 1.5; }
-  .mail img { max-width: 100%%; }
-  .footer { margin-top: 28px; padding-top: 12px; border-top: 1px dashed #cccccc;
-            font-size: 12px; color: #888888; }
-</style>
-</head>
-<body>
-  <div class="mail">
-    %s
-    <div class="footer">
-      <p><a href="#">Unsubscribe</a> &larr; the unsubscribe link is appended here on send</p>
-      <p>&#9633; 1&times;1 open-tracking pixel is appended here (invisible in real mail)</p>
-    </div>
-  </div>
-</body>
-</html>`
+// previewFooterMock marks where the unsubscribe link and pixel are appended.
+const previewFooterMock = `
+<div style="margin-top:28px;padding-top:12px;border-top:1px dashed #cccccc;font-size:12px;color:#888888">
+<p><a href="#">Unsubscribe</a> &larr; the unsubscribe link is appended here on send</p>
+<p>&#9633; 1&times;1 open-tracking pixel is appended here (invisible in real mail)</p>
+</div>`
 
 // handleMailingPreview renders the saved draft body inside a mail-client-like
 // shell (light 600px column) so image placement and layout can be checked
@@ -2175,7 +2265,17 @@ func (s *server) handleMailingPreview(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src * data:; style-src 'unsafe-inline'; frame-ancestors 'self'")
-	fmt.Fprintf(w, previewShell, m.BodyHTML)
+
+	// Render through the same wrapper used at send time, so the preview is the
+	// exact table skeleton recipients get. Full-document bodies (the escape
+	// hatch) are shown verbatim, without the placement mock.
+	body := m.BodyHTML
+	probe := strings.ToLower(body)
+	if strings.Contains(probe, "<html") || strings.Contains(probe, "<!doctype") {
+		_, _ = io.WriteString(w, body)
+		return
+	}
+	_, _ = io.WriteString(w, wrapEmailLayout(body+previewFooterMock))
 }
 
 // ---- Plain-text alternative --------------------------------------------------

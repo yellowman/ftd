@@ -264,6 +264,11 @@ func main() {
 		log.Fatalf("runtime pledge failed: %v", err)
 	}
 
+	// Pick up any mailings a previous process left mid-delivery.
+	if err := s.resumeStalledMailings(context.Background()); err != nil {
+		log.Printf("resume stalled mailings: %v", err)
+	}
+
 	log.Printf("Starting FastCGI listener for submissions and admin on %s", desc)
 	if err := s.serveFastCGI(listener); err != nil {
 		log.Fatalf("FastCGI server failed: %v", err)
@@ -1688,11 +1693,18 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "a valid email is required", http.StatusBadRequest)
 			return
 		}
+		// On an existing email, merge like intake and CSV import: non-empty
+		// form fields win, blanks leave existing data untouched.
 		var id int64
 		err := s.db.QueryRowContext(r.Context(),
 			`INSERT INTO customers (email, name, company, phone, address)
 			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''))
-			 ON CONFLICT (email) DO UPDATE SET updated_at = NOW()
+			 ON CONFLICT (email) DO UPDATE SET
+			     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
+			     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
+			     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
+			     address = COALESCE(NULLIF(EXCLUDED.address, ''), customers.address),
+			     updated_at = NOW()
 			 RETURNING id`,
 			email,
 			strings.TrimSpace(r.FormValue("name")),
