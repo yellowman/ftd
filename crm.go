@@ -984,72 +984,41 @@ func (s *server) sendMailingFlow(w http.ResponseWriter, r *http.Request, id int6
 		return
 	}
 
-	// Materialize the recipient set: subscribed, non-bounced customers with an
-	// email, from the selected list or (no list) every customer.
-	recipQuery := `SELECT c.id, c.email FROM customers c
-	    WHERE c.email IS NOT NULL AND c.unsubscribed_at IS NULL AND c.bounced_at IS NULL`
-	args := []interface{}{}
+	// Materialize the entire audience in one atomic INSERT ... SELECT:
+	// subscribed, non-bounced customers with an email, from the selected list
+	// or (no list) every customer. A single statement means a crash can never
+	// leave a partially-enqueued audience — either every recipient row exists
+	// or none do (and resume reverts the no-rows case to draft). Tokens are
+	// md5(gen_random_uuid() ...): 32 lowercase hex, matching tokenRe, from
+	// PostgreSQL's CSPRNG.
+	recipInsert := `INSERT INTO mailing_recipients (mailing_id, customer_id, email, token)
+	    SELECT $1::integer, c.id, c.email, md5(gen_random_uuid()::text || c.id::text)
+	    FROM customers c
+	    WHERE c.email IS NOT NULL AND c.unsubscribed_at IS NULL AND c.bounced_at IS NULL
+	    ON CONFLICT (mailing_id, customer_id) DO NOTHING`
+	args := []interface{}{id}
 	if m.ListID.Valid {
-		recipQuery = `SELECT c.id, c.email FROM customers c
+		recipInsert = `INSERT INTO mailing_recipients (mailing_id, customer_id, email, token)
+		    SELECT $1::integer, c.id, c.email, md5(gen_random_uuid()::text || c.id::text)
+		    FROM customers c
 		    JOIN list_members lm ON lm.customer_id = c.id
-		    WHERE lm.list_id = $1 AND c.email IS NOT NULL AND c.unsubscribed_at IS NULL AND c.bounced_at IS NULL`
+		    WHERE lm.list_id = $2 AND c.email IS NOT NULL AND c.unsubscribed_at IS NULL AND c.bounced_at IS NULL
+		    ON CONFLICT (mailing_id, customer_id) DO NOTHING`
 		args = append(args, m.ListID.Int64)
 	}
-	rows, err := s.db.QueryContext(r.Context(), recipQuery, args...)
+	res, err = s.db.ExecContext(r.Context(), recipInsert, args...)
 	if err != nil {
-		log.Printf("recipient query error: %v", err)
-		s.markMailingFailed(r.Context(), id)
+		// Atomic: nothing was enqueued, so the draft is safe to release.
+		log.Printf("recipient enqueue error: %v", err)
+		unclaim()
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
-	type rcpt struct {
-		customerID int64
-		email      string
-	}
-	rcpts := []rcpt{}
-	for rows.Next() {
-		var rc rcpt
-		if err := rows.Scan(&rc.customerID, &rc.email); err != nil {
-			log.Printf("recipient scan error: %v", err)
-			s.markMailingFailed(r.Context(), id)
-			http.Error(w, "server error", http.StatusInternalServerError)
-			return
-		}
-		rcpts = append(rcpts, rc)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("recipient query error: %v", err)
-		s.markMailingFailed(r.Context(), id)
-		http.Error(w, "server error", http.StatusInternalServerError)
-		return
-	}
-	if len(rcpts) == 0 {
+	if n, _ := res.RowsAffected(); n == 0 {
 		// Nothing to enqueue: release the claim so the draft stays editable.
 		unclaim()
 		http.Redirect(w, r, view+"&msg=norecipients", http.StatusSeeOther)
 		return
-	}
-
-	for _, rc := range rcpts {
-		token, err := generateRandomHex(16)
-		if err != nil {
-			log.Printf("token error: %v", err)
-			s.markMailingFailed(r.Context(), id)
-			http.Error(w, "server error", http.StatusInternalServerError)
-			return
-		}
-		// The unique (mailing_id, customer_id) index makes retries after a
-		// partial failure safe: existing rows are kept, not duplicated.
-		if _, err := s.db.ExecContext(r.Context(),
-			`INSERT INTO mailing_recipients (mailing_id, customer_id, email, token) VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (mailing_id, customer_id) DO NOTHING`,
-			id, rc.customerID, rc.email, token); err != nil {
-			log.Printf("recipient insert error: %v", err)
-			s.markMailingFailed(r.Context(), id)
-			http.Error(w, "server error", http.StatusInternalServerError)
-			return
-		}
 	}
 
 	go s.runMailingSend(id)
@@ -1133,8 +1102,14 @@ func (s *server) resumeStalledMailings(ctx context.Context) error {
 
 	for _, st := range found {
 		if st.total == 0 {
-			log.Printf("mailing %d: stuck in sending with no recipients; marking failed", st.id)
-			s.markMailingFailed(ctx, st.id)
+			// Crashed after claiming the draft but before the (atomic)
+			// audience enqueue: nothing was sent, so hand the draft back
+			// instead of dead-ending in failed.
+			log.Printf("mailing %d: claimed but no audience was enqueued; reverting to draft", st.id)
+			if _, err := s.db.ExecContext(ctx,
+				`UPDATE mailings SET status='draft' WHERE id=$1 AND status='sending'`, st.id); err != nil {
+				log.Printf("mailing %d: revert to draft failed: %v", st.id, err)
+			}
 			continue
 		}
 		// Rows stuck in 'sending' were claimed by a worker that died
