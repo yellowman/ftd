@@ -344,8 +344,8 @@ func (s *server) handleListView(w http.ResponseWriter, r *http.Request) {
 func (s *server) applyListMemberAction(r *http.Request, listID int64) *passwordFlash {
 	switch r.FormValue("action") {
 	case "add":
-		email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
-		if !strings.Contains(email, "@") {
+		email, ok := sanitizeEmail(r.FormValue("email"))
+		if !ok {
 			return &passwordFlash{Message: "Enter a customer email address.", Kind: "error"}
 		}
 		var customerID int64
@@ -1406,7 +1406,8 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	if s.replyTo != "" && !sameAddress(s.replyTo, s.mailFrom) {
 		fmt.Fprintf(&buf, "Reply-To: %s\r\n", s.replyTo)
 	}
-	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", m.Subject))
+	subject := strings.NewReplacer("\r", " ", "\n", " ").Replace(m.Subject)
+	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject))
 	fmt.Fprintf(&buf, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
 	if unsubURL != "" {
 		fmt.Fprintf(&buf, "List-Unsubscribe: <%s>\r\n", unsubURL)
@@ -1436,6 +1437,23 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	return buf.Bytes()
 }
 
+// sanitizeEmail validates and canonicalizes an email address from any
+// untrusted source (forms, CSV, admin input). It must be a bare addr-spec
+// that net/mail parses back to itself — which excludes CR/LF and other
+// header-injection vectors, display names, and angle brackets. Returns the
+// lowercased address and whether it was acceptable.
+func sanitizeEmail(raw string) (string, bool) {
+	addr := strings.TrimSpace(raw)
+	if addr == "" || len(addr) > 320 || strings.ContainsAny(addr, "\r\n\t <>") {
+		return "", false
+	}
+	parsed, err := mail.ParseAddress(addr)
+	if err != nil || parsed.Address != addr {
+		return "", false
+	}
+	return strings.ToLower(addr), true
+}
+
 // sameAddress compares two header values by their email address, so
 // "Sales <sales@x.com>" and "sales@x.com" count as the same; falls back to a
 // case-insensitive string compare when either does not parse.
@@ -1449,6 +1467,12 @@ func sameAddress(a, b string) bool {
 }
 
 func (s *server) sendSMTP(to string, msg []byte) error {
+	// Backstop against header injection for addresses that entered the
+	// database before validation existed: never hand a non-addr-spec to the
+	// relay or the To header builder.
+	if _, ok := sanitizeEmail(to); !ok {
+		return fmt.Errorf("invalid recipient address %q", to)
+	}
 	var auth smtp.Auth
 	if s.smtpUser != "" {
 		// SplitHostPort is the inverse of the JoinHostPort used to build
@@ -1664,8 +1688,8 @@ func (s *server) handleMailingTest(w http.ResponseWriter, r *http.Request) {
 func (s *server) testSendFlow(w http.ResponseWriter, r *http.Request, id int64, rawEmail string) {
 	view := s.adminPath("/mailings/view?id=" + strconv.FormatInt(id, 10))
 
-	email := strings.ToLower(strings.TrimSpace(rawEmail))
-	if !strings.Contains(email, "@") {
+	email, ok := sanitizeEmail(rawEmail)
+	if !ok {
 		http.Redirect(w, r, view+"&msg=testbad", http.StatusSeeOther)
 		return
 	}
@@ -1945,8 +1969,8 @@ func (s *server) handleCustomerImport(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
-		email := strings.ToLower(field(rec, "email"))
-		if !strings.Contains(email, "@") {
+		email, ok := sanitizeEmail(field(rec, "email"))
+		if !ok {
 			skipped++
 			continue
 		}

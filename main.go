@@ -1673,10 +1673,7 @@ func extractContact(payload map[string]interface{}) (email, name, company, phone
 		return ""
 	}
 
-	email = strings.ToLower(pick("email", "e-mail", "email_address", "emailaddress", "your_email"))
-	if !strings.Contains(email, "@") {
-		email = ""
-	}
+	email, _ = sanitizeEmail(pick("email", "e-mail", "email_address", "emailaddress", "your_email"))
 	name = pick("name", "full_name", "fullname", "your_name", "contact_name")
 	if name == "" {
 		first := pick("first_name", "firstname", "fname")
@@ -1797,8 +1794,8 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
-		if !strings.Contains(email, "@") {
+		email, ok := sanitizeEmail(r.FormValue("email"))
+		if !ok {
 			http.Error(w, "a valid email is required", http.StatusBadRequest)
 			return
 		}
@@ -1983,10 +1980,14 @@ func (s *server) handleCustomerUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
-	if email != "" && !strings.Contains(email, "@") {
-		http.Error(w, "invalid email", http.StatusBadRequest)
-		return
+	email := strings.TrimSpace(r.FormValue("email"))
+	if email != "" {
+		sanitized, ok := sanitizeEmail(email)
+		if !ok {
+			http.Error(w, "invalid email", http.StatusBadRequest)
+			return
+		}
+		email = sanitized
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	company := strings.TrimSpace(r.FormValue("company"))
