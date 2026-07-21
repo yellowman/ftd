@@ -183,6 +183,19 @@ func (s *server) handleLists(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid id", http.StatusBadRequest)
 				return
 			}
+			// A draft composed for this list would lose its audience (the FK
+			// is ON DELETE SET NULL); make the operator re-target first.
+			var draftCount int
+			if err := s.db.QueryRowContext(r.Context(),
+				`SELECT COUNT(*) FROM mailings WHERE list_id=$1 AND status='draft'`, id).Scan(&draftCount); err != nil {
+				log.Printf("list draft check error: %v", err)
+				s.renderLists(w, r, &passwordFlash{Message: "Unable to delete list right now", Kind: "error"})
+				return
+			}
+			if draftCount > 0 {
+				s.renderLists(w, r, &passwordFlash{Message: fmt.Sprintf("This list is the audience of %d draft mailing(s). Change their audience first.", draftCount), Kind: "error"})
+				return
+			}
 			if _, err := s.db.ExecContext(r.Context(), `DELETE FROM lists WHERE id=$1`, id); err != nil {
 				log.Printf("delete list error: %v", err)
 				s.renderLists(w, r, &passwordFlash{Message: "Unable to delete list right now", Kind: "error"})
@@ -407,6 +420,7 @@ type Mailing struct {
 	BodyHTML  string
 	ListID    sql.NullInt64
 	ListName  sql.NullString
+	Audience  string // 'all' or 'list' — explicit intent, survives list deletion
 	Status    string
 	CreatedBy sql.NullString
 	CreatedAt time.Time
@@ -532,10 +546,10 @@ func (s *server) renderMailings(w http.ResponseWriter, r *http.Request, flash *p
 func (s *server) loadMailing(ctx context.Context, id int64) (*Mailing, error) {
 	var m Mailing
 	err := s.db.QueryRowContext(ctx,
-		`SELECT m.id, m.subject, m.body_html, m.list_id, m.status, m.created_by, m.created_at, m.sent_at, l.name,
+		`SELECT m.id, m.subject, m.body_html, m.list_id, m.audience, m.status, m.created_by, m.created_at, m.sent_at, l.name,
 		    (SELECT string_agg(t.name, ', ' ORDER BY t.name) FROM mailing_tags mt JOIN tags t ON t.id = mt.tag_id WHERE mt.mailing_id = m.id)
 		 FROM mailings m LEFT JOIN lists l ON l.id = m.list_id WHERE m.id=$1`, id,
-	).Scan(&m.ID, &m.Subject, &m.BodyHTML, &m.ListID, &m.Status, &m.CreatedBy, &m.CreatedAt, &m.SentAt, &m.ListName, &m.Tags)
+	).Scan(&m.ID, &m.Subject, &m.BodyHTML, &m.ListID, &m.Audience, &m.Status, &m.CreatedBy, &m.CreatedAt, &m.SentAt, &m.ListName, &m.Tags)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
@@ -715,6 +729,8 @@ func mapMailingFlash(code string) *passwordFlash {
 		return &passwordFlash{Message: "This mailing cannot be retried right now.", Kind: "error"}
 	case "noretryable":
 		return &passwordFlash{Message: "Nothing to retry — remaining failures are hard-bounced addresses (clear the bounce on the customer page first).", Kind: "error"}
+	case "audiencegone":
+		return &passwordFlash{Message: "This draft targeted a list that has been deleted. Pick a new audience and save before sending.", Kind: "error"}
 	default:
 		return nil
 	}
@@ -747,6 +763,7 @@ func (s *server) handleMailingUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var listID interface{}
+	audience := "all"
 	if v := r.FormValue("list_id"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -754,11 +771,12 @@ func (s *server) handleMailingUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		listID = n
+		audience = "list"
 	}
 
 	res, err := s.db.ExecContext(r.Context(),
-		`UPDATE mailings SET subject=$1, body_html=$2, list_id=$3 WHERE id=$4 AND status='draft'`,
-		subject, body, listID, id)
+		`UPDATE mailings SET subject=$1, body_html=$2, list_id=$3, audience=$4 WHERE id=$5 AND status='draft'`,
+		subject, body, listID, audience, id)
 	if err != nil {
 		log.Printf("update mailing error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
@@ -991,6 +1009,14 @@ func (s *server) sendMailingFlow(w http.ResponseWriter, r *http.Request, id int6
 	if strings.TrimSpace(m.Subject) == "" || strings.TrimSpace(m.BodyHTML) == "" {
 		unclaim()
 		http.Redirect(w, r, view+"&msg=empty", http.StatusSeeOther)
+		return
+	}
+	// The draft was composed for a list that no longer exists (ON DELETE SET
+	// NULL cleared the reference). Refuse rather than silently mailing the
+	// entire directory.
+	if m.Audience == "list" && !m.ListID.Valid {
+		unclaim()
+		http.Redirect(w, r, view+"&msg=audiencegone", http.StatusSeeOther)
 		return
 	}
 

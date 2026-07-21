@@ -65,11 +65,18 @@ CREATE TABLE IF NOT EXISTS mailings (
     subject TEXT NOT NULL,
     body_html TEXT NOT NULL,
     list_id INTEGER REFERENCES lists (id) ON DELETE SET NULL,
+    -- Explicit audience intent. list_id alone is ambiguous: ON DELETE SET NULL
+    -- would otherwise silently turn a list-targeted draft into "all customers".
+    audience TEXT NOT NULL DEFAULT 'all' CHECK (audience IN ('all','list')),
     status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','sending','sent','failed')),
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     sent_at TIMESTAMPTZ
 );
+
+-- Upgrade path: infer intent for rows that predate the column.
+ALTER TABLE mailings ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'all';
+UPDATE mailings SET audience = 'list' WHERE list_id IS NOT NULL AND audience = 'all';
 
 CREATE TABLE IF NOT EXISTS mailing_recipients (
     id SERIAL PRIMARY KEY,
