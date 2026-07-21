@@ -160,18 +160,20 @@ func (e *limitErr) Error() string {
 func main() {
 	tcpPort := flag.Int("tcp", 0, "optional TCP port for FastCGI instead of a Unix socket")
 	deliver := flag.Bool("deliver", false, "read one email from stdin, file it as a submission, and exit (Postfix pipe/aliases helper)")
-	envFile := flag.String("envfile", "/etc/ftd.env", "environment file loaded by -deliver when variables are unset")
+	configFile := flag.String("config", "/etc/ftd.conf", "configuration file (postfix-style lowercase key = value)")
 	flag.Parse()
 
 	if *deliver {
-		os.Exit(runDeliver(*envFile))
+		os.Exit(runDeliver(*configFile))
 	}
+
+	loadConfigFile(*configFile)
 
 	useTCP := *tcpPort != 0
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("DATABASE_URL must be set")
+		log.Fatalf("database_url must be set (in %s or the DATABASE_URL environment variable)", *configFile)
 	}
 
 	fastcgiSock := os.Getenv("FASTCGI_SOCKET")
@@ -321,6 +323,38 @@ func main() {
 	log.Printf("Starting FastCGI listener for submissions and admin on %s", desc)
 	if err := s.serveFastCGI(listener); err != nil {
 		log.Fatalf("FastCGI server failed: %v", err)
+	}
+}
+
+// loadConfigFile reads a postfix-style configuration file: lowercase
+// `key = value` lines, blank lines and #-comments ignored, optional quotes
+// around values. Each key maps to the corresponding uppercase environment
+// variable (database_url -> DATABASE_URL); environment variables that are
+// already set take precedence, so the file is the base configuration and the
+// environment can override it. A missing file is not an error.
+func loadConfigFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for lineno, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			log.Printf("%s:%d: ignoring malformed line", path, lineno+1)
+			continue
+		}
+		key = strings.ToUpper(strings.TrimSpace(key))
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		if key == "" {
+			continue
+		}
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
 	}
 }
 

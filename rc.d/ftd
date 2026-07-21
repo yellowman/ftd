@@ -1,6 +1,8 @@
 #!/bin/ksh
 # ftd FastCGI form collector
 #
+# All configuration lives in /etc/ftd.conf, loaded by the daemon itself, so
+# this script needs no environment handling.
 daemon="/usr/local/bin/ftd"
 daemon_flags=${ftd_flags:-""}
 
@@ -8,20 +10,5 @@ daemon_flags=${ftd_flags:-""}
 
 rc_bg=YES
 rc_reload=NO
-
-: ${ftd_envfile:=/etc/ftd.env}
-
-# rc.subr launches the daemon through `su -l` to apply its login class, and a
-# login shell resets the environment. Source the config inside that same shell,
-# immediately before exec, so DATABASE_URL (and anything else in ${ftd_envfile})
-# actually reaches the process. Loading it in rc_pre or at the top level does
-# not work: the su(1) login shell discards those exports before ftd starts.
-#
-# ${_bg} is rc.subr's backgrounding token ("&" when rc_bg=YES): the stock
-# rc_start appends it inside the command string, and omitting it here would
-# leave ftd in the foreground and block `rcctl start`.
-rc_start() {
-	${rcexec} "set -a; [ -r '${ftd_envfile}' ] && . '${ftd_envfile}'; set +a; exec ${daemon} ${daemon_flags} ${_bg}"
-}
 
 rc_cmd $1

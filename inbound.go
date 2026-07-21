@@ -265,31 +265,6 @@ func (s *server) lmtpSession(conn net.Conn) {
 
 // ---- `ftd -deliver` helper --------------------------------------------------
 
-// loadEnvFile sets KEY=VALUE pairs from a config file into the environment for
-// variables not already set. Postfix pipe/aliases delivery strips the
-// environment, so the -deliver helper reads /etc/ftd.env itself.
-func loadEnvFile(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		val = strings.Trim(strings.TrimSpace(val), `"'`)
-		if os.Getenv(key) == "" {
-			os.Setenv(key, val)
-		}
-	}
-}
-
 // Postfix-compatible sysexits.
 const (
 	exTempFail    = 75 // EX_TEMPFAIL: postfix requeues and retries
@@ -299,8 +274,8 @@ const (
 // runDeliver is the `ftd -deliver` entry point: read one message from stdin,
 // file it, exit. Exit codes follow sysexits so Postfix requeues on transient
 // database problems instead of bouncing.
-func runDeliver(envFile string) int {
-	loadEnvFile(envFile)
+func runDeliver(configFile string) int {
+	loadConfigFile(configFile)
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {

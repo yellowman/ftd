@@ -29,7 +29,10 @@ Point a FastCGI-capable web server at TCP 9000 (or at the Unix socket, see
 below), then log in at `/form/admin/` as `admin` / `change-me` and change the
 password. Sample forms: `sample_form.html`, `sample_form_upload.html`.
 
-**Database permissions:** the role in `DATABASE_URL` needs the tables *and*
+(Inline environment variables work for one-off runs like this; for a real
+install put the settings in `/etc/ftd.conf` — see Configuration.)
+
+**Database permissions:** the role in `database_url` needs the tables *and*
 sequences. Easiest is to run `schema.sql` as that role so it owns everything.
 Otherwise, as the owner:
 
@@ -69,14 +72,13 @@ server "example.com" {
 }
 ```
 
-Service environment and startup:
+Configuration and startup (the daemon reads `/etc/ftd.conf` itself; see the
+Configuration section):
 
 ```sh
 install -m 755 rc.d/ftd /etc/rc.d/ftd
-cat > /etc/ftd.env <<'EOF'
-DATABASE_URL="postgres://ftd:pass@localhost/ftd?sslmode=disable"
-SESSION_SECRET="put-a-long-random-string-here"
-EOF
+install -m 640 ftd.conf /etc/ftd.conf
+vi /etc/ftd.conf      # uncomment and set database_url and session_secret
 
 rcctl enable httpd ftd
 rcctl start httpd ftd
@@ -130,7 +132,6 @@ Description=ftd form collector
 After=network.target postgresql.service
 
 [Service]
-EnvironmentFile=/etc/ftd.env
 ExecStart=/usr/local/bin/ftd
 Restart=on-failure
 
@@ -139,10 +140,8 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-sudo tee /etc/ftd.env >/dev/null <<'EOF'
-DATABASE_URL=postgres://ftd:pass@localhost/ftd?sslmode=disable
-SESSION_SECRET=put-a-long-random-string-here
-EOF
+sudo install -m 640 ftd.conf /etc/ftd.conf
+sudo vi /etc/ftd.conf     # uncomment and set database_url and session_secret
 sudo systemctl enable --now ftd
 ```
 
@@ -151,28 +150,35 @@ privileges. Log in at `/form/admin/` and change the default password.
 
 ## Configuration
 
-All configuration is via environment variables:
+ftd configures itself from `/etc/ftd.conf` (postfix-style, lowercase
+`key = value`, `#` comments; override the path with `-config`). The repo ships
+an `ftd.conf` example listing every option, commented out — install it and
+uncomment what you need. Environment variables with the same name in uppercase
+(`database_url` → `DATABASE_URL`) override the file, which is handy for
+development and one-off runs.
 
-| Variable | Description | Default |
+| Key | Description | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string. Add `?sslmode=disable` for a local non-TLS server; use `sslmode=require`/`verify-full` for remote ones. | **Required** |
-| `FASTCGI_SOCKET` | Unix socket path for the FastCGI listener (ignored with `-tcp`). | `/var/www/run/ftd.sock` |
-| `FORM_PATH` | Submission endpoint path. | `/form` |
-| `ADMIN_PREFIX` | Admin dashboard path prefix. | `/form/admin` |
-| `TRACK_PATH` | Public tracking endpoints prefix (`/open`, `/c`, `/unsub`). | `/form/t` |
-| `SESSION_SECRET` | Signs admin session cookies. Unset = random per-process key (sessions reset on restart). | Generated |
-| `SESSION_COOKIE_INSECURE` | Set to drop the `Secure` cookie flag (plain-HTTP dev only). | Not set |
-| `MAX_UPLOAD_MB` | Max file upload size in MB; `0` disables uploads. | `0` |
-| `RATE_LIMIT_PER_MIN` | Submissions allowed per IP per rolling minute before a block. Size it above the number of forms a legitimate visitor might submit in one sitting. | `8` |
-| `RATE_BLOCK_MINUTES` | How long an IP that exceeds the limit is blocked. | `60` |
-| `SMTP_HOST` / `SMTP_PORT` | SMTP relay for mailings. Sending is disabled until `SMTP_HOST` and `MAIL_FROM` are set. | Not set / `25` |
-| `SMTP_USER` / `SMTP_PASS` | Optional SMTP AUTH (PLAIN; STARTTLS used when offered). | Not set |
-| `MAIL_FROM` | From address for mailings. | Not set |
-| `PUBLIC_BASE_URL` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
-| `REPLY_TO` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
-| `REPLY_LMTP_SOCKET` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
+| `database_url` | PostgreSQL connection string. Add `?sslmode=disable` for a local non-TLS server; use `sslmode=require`/`verify-full` for remote ones. | **Required** |
+| `fastcgi_socket` | Unix socket path for the FastCGI listener (ignored with `-tcp`). | `/var/www/run/ftd.sock` |
+| `form_path` | Submission endpoint path. | `/form` |
+| `admin_prefix` | Admin dashboard path prefix. | `/form/admin` |
+| `track_path` | Public tracking endpoints prefix (`/open`, `/c`, `/unsub`, `/img`). | `/form/t` |
+| `session_secret` | Signs admin session cookies. Unset = random per-process key (sessions reset on restart). | Generated |
+| `session_cookie_insecure` | Set to drop the `Secure` cookie flag (plain-HTTP dev only). | Not set |
+| `max_upload_mb` | Max file upload size in MB; `0` disables uploads. | `0` |
+| `rate_limit_per_min` | Submissions allowed per IP per rolling minute before a block. Size it above the number of forms a legitimate visitor might submit in one sitting. | `8` |
+| `rate_block_minutes` | How long an IP that exceeds the limit is blocked. | `60` |
+| `smtp_host` / `smtp_port` | SMTP relay for mailings. Sending is disabled until `smtp_host` and `mail_from` are set. | Not set / `25` |
+| `smtp_user` / `smtp_pass` | Optional SMTP AUTH (PLAIN; STARTTLS used when offered). | Not set |
+| `mail_from` | From address for mailings. | Not set |
+| `public_base_url` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
+| `reply_to` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
+| `reply_lmtp_socket` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
 
-The binary takes one flag: `-tcp <port>` listens on TCP instead of the Unix socket.
+Flags: `-tcp <port>` listens on TCP instead of the Unix socket;
+`-config <path>` selects the configuration file; `-deliver` (with optional
+`-config`) files one email from stdin and exits.
 
 ## Using it
 
@@ -226,7 +232,7 @@ Interrupted deliveries (crash/restart mid-send) resume automatically on
 startup; only still-pending recipients are mailed. Mail goes out over the SMTP
 relay in the background; the mailing page shows per-recipient delivery, opens,
 clicks, and per-link click totals. Every message carries an unsubscribe link
-and `List-Unsubscribe` header (when `PUBLIC_BASE_URL` is set); unsubscribed
+and `List-Unsubscribe` header (when `public_base_url` is set); unsubscribed
 customers and hard-bounced addresses (SMTP 5xx) are skipped automatically.
 Bounces can be cleared from the customer page. Async bounces that arrive at
 your relay's return-path mailbox are outside ftd's view — handle those at the
@@ -235,15 +241,15 @@ relay.
 **Replies become to-dos** — when a customer answers a mailing, the reply can
 land straight in the submission inbox as a new to-do card, linked to their
 customer record (the text body, decoded subject, and sender are extracted;
-bounces and auto-responders are discarded). Set `REPLY_TO` to the mailbox
+bounces and auto-responders are discarded). Set `reply_to` to the mailbox
 address, then route that address into ftd with Postfix either way:
 
 *LMTP (recommended — Postfix delivers into the running daemon):*
 
-```sh
-# /etc/ftd.env
-REPLY_TO=sales@example.com
-REPLY_LMTP_SOCKET=/var/www/run/ftd-lmtp.sock
+```
+# /etc/ftd.conf
+reply_to = sales@example.com
+reply_lmtp_socket = /var/www/run/ftd-lmtp.sock
 ```
 
 ```
@@ -267,16 +273,16 @@ sales: "|/usr/local/bin/ftd -deliver"
 ```
 
 Run `newaliases`. The helper reads one message on stdin, loads
-`/etc/ftd.env` itself (Postfix strips the environment; override the path with
-`-envfile`), files the reply, and exits with sysexits codes so transient
-database problems are requeued rather than bounced.
+`/etc/ftd.conf` itself (override the path with `-config`), files the reply,
+and exits with sysexits codes so transient database problems are requeued
+rather than bounced.
 
 **Deliverability** — publish SPF, sign with DKIM at the relay (setups below),
 and set rDNS/PTR for the relay IP, or expect spam-foldering.
 
 ## DKIM signing at the relay
 
-ftd hands mail to your local MTA (`SMTP_HOST=127.0.0.1`); the MTA signs it on
+ftd hands mail to your local MTA (`smtp_host = 127.0.0.1`); the MTA signs it on
 the way out. Either recipe below ends with the same DNS step.
 
 ### OpenBSD: OpenSMTPD + filter-dkimsign
@@ -376,4 +382,5 @@ pick a new selector, publish the new TXT record, then switch the signer.
 - `schema.sql` – idempotent schema; run it for installs *and* upgrades.
 - `templates/`, `static/` – admin UI (embedded into the binary at build time).
 - `sample_form.html`, `sample_form_upload.html` – example forms.
-- `rc.d/ftd` – OpenBSD rc.d script (loads `/etc/ftd.env`).
+- `ftd.conf` – example configuration listing every option, commented out; install to `/etc/ftd.conf`.
+- `rc.d/ftd` – OpenBSD rc.d script.
