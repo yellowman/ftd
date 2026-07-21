@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"regexp"
@@ -1297,7 +1298,8 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "From: %s\r\n", s.mailFrom)
 	fmt.Fprintf(&buf, "To: %s\r\n", email)
-	if s.replyTo != "" {
+	// A Reply-To identical to From is noise; replies go there anyway.
+	if s.replyTo != "" && !sameAddress(s.replyTo, s.mailFrom) {
 		fmt.Fprintf(&buf, "Reply-To: %s\r\n", s.replyTo)
 	}
 	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", m.Subject))
@@ -1328,6 +1330,18 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	_ = mw.Close()
 
 	return buf.Bytes()
+}
+
+// sameAddress compares two header values by their email address, so
+// "Sales <sales@x.com>" and "sales@x.com" count as the same; falls back to a
+// case-insensitive string compare when either does not parse.
+func sameAddress(a, b string) bool {
+	pa, errA := mail.ParseAddress(a)
+	pb, errB := mail.ParseAddress(b)
+	if errA == nil && errB == nil {
+		return strings.EqualFold(pa.Address, pb.Address)
+	}
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 func (s *server) sendSMTP(to string, msg []byte) error {
