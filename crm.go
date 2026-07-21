@@ -12,6 +12,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/smtp"
@@ -1387,9 +1388,12 @@ func sameAddress(a, b string) bool {
 func (s *server) sendSMTP(to string, msg []byte) error {
 	var auth smtp.Auth
 	if s.smtpUser != "" {
-		host := s.smtpAddr
-		if i := strings.LastIndex(host, ":"); i >= 0 {
-			host = host[:i]
+		// SplitHostPort is the inverse of the JoinHostPort used to build
+		// smtpAddr: it unbrackets IPv6 literals ("[::1]:25" -> "::1"), which a
+		// naive cut at the last colon would mangle and break AUTH.
+		host, _, err := net.SplitHostPort(s.smtpAddr)
+		if err != nil {
+			host = s.smtpAddr
 		}
 		auth = smtp.PlainAuth("", s.smtpUser, s.smtpPass, host)
 	}
