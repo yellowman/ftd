@@ -130,7 +130,7 @@
     <section class="password-card">
       <div>
         <h2>{{if eq .Mailing.Status "failed"}}Delivery failed{{else}}Partial delivery — {{.Mailing.Failed}} recipient(s) failed{{end}}</h2>
-        <p>Retry re-sends to recipients that failed transiently or were never attempted. Already-delivered recipients and hard-bounced addresses are skipped.</p>
+        <p>Retry re-sends to recipients that failed transiently or were never attempted. Already-delivered recipients and hard-bounced addresses are skipped. Recipients marked “interrupted mid-delivery” have unknown state — retrying them may deliver a duplicate.</p>
       </div>
       <form method="post" action="{{.AdminPrefix}}/mailings/retry">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">

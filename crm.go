@@ -1097,11 +1097,13 @@ func isHardSMTPError(err error) bool {
 }
 
 // resumeStalledMailings restarts delivery for mailings left in 'sending' by a
-// crash, restart, or deploy. The worker only processes recipients still in
-// 'pending', so resuming is idempotent: already-delivered recipients are not
-// mailed twice. A 'sending' mailing with no recipient rows at all crashed
-// between claim and enqueue and is finalized as failed (the draft mutex has
-// already fired, so it could never complete otherwise).
+// crash, restart, or deploy. Only never-attempted ('pending') recipients are
+// auto-resumed; rows caught mid-delivery are marked failed rather than
+// requeued, because SMTP may already have accepted them and automatic
+// redelivery would duplicate mail (the admin can retry them deliberately).
+// A 'sending' mailing with no recipient rows at all crashed between claim and
+// enqueue and is finalized as failed (the draft mutex has already fired, so
+// it could never complete otherwise).
 func (s *server) resumeStalledMailings(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT m.id,
@@ -1135,11 +1137,20 @@ func (s *server) resumeStalledMailings(ctx context.Context) error {
 			s.markMailingFailed(ctx, st.id)
 			continue
 		}
-		// Rows stuck in 'sending' were claimed by a worker that died mid-send;
-		// return them to the pool. (At startup no worker of ours is running.)
-		if _, err := s.db.ExecContext(ctx,
-			`UPDATE mailing_recipients SET status='pending' WHERE mailing_id=$1 AND status='sending'`, st.id); err != nil {
-			log.Printf("mailing %d: reclaim of stuck recipients failed: %v", st.id, err)
+		// Rows stuck in 'sending' were claimed by a worker that died
+		// mid-delivery. SMTP may already have accepted those messages, so
+		// automatically requeueing them risks duplicates. Mark them failed
+		// with an explanatory error instead: the admin can consciously
+		// redeliver via "Retry failed recipients". Rows still 'pending' were
+		// never attempted and resume safely.
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE mailing_recipients SET status='failed',
+			     error='interrupted mid-delivery by a restart; the message may or may not have been sent'
+			 WHERE mailing_id=$1 AND status='sending'`, st.id)
+		if err != nil {
+			log.Printf("mailing %d: marking stuck recipients failed: %v", st.id, err)
+		} else if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("mailing %d: %d recipient(s) were mid-delivery at the crash; marked failed (not auto-resent — delivery state unknown)", st.id, n)
 		}
 		log.Printf("mailing %d: resuming delivery (%d of %d recipients pending)", st.id, st.pending, st.total)
 		go s.runMailingSend(st.id)

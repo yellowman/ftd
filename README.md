@@ -231,7 +231,11 @@ escape hatch. Messages go out as `multipart/alternative` with an
 auto-generated plain-text version (links become `text (url)`, lists become
 bullets), so text-only mail clients get clean text instead of raw HTML.
 Interrupted deliveries (crash/restart mid-send) resume automatically on
-startup; only still-pending recipients are mailed. Mail goes out over the SMTP
+startup: never-attempted recipients are mailed, while recipients caught
+mid-delivery are marked failed with an "interrupted" note instead of being
+auto-resent — SMTP may already have accepted those messages, and ftd never
+risks automatic duplicates. Redeliver them deliberately with the "Retry
+failed recipients" button. Mail goes out over the SMTP
 relay in the background; the mailing page shows per-recipient delivery, opens,
 clicks, and per-link click totals. Every message carries an unsubscribe link
 and `List-Unsubscribe` header (when `public_base_url` is set); unsubscribed
