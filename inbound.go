@@ -284,8 +284,10 @@ func (s *server) lmtpSession(conn net.Conn) {
 				if trimmed == "." {
 					break
 				}
-				// Dot-unstuffing per RFC 5321 §4.5.2.
-				if strings.HasPrefix(trimmed, "..") {
+				// Dot-unstuffing per RFC 5321 §4.5.2: any non-terminator line
+				// whose first character is a period loses that period —
+				// regardless of the second character, not only "..".
+				if len(trimmed) > 1 && trimmed[0] == '.' {
 					trimmed = trimmed[1:]
 				}
 				if b.Len()+len(trimmed) < maxInboundBytes {
