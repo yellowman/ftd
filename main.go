@@ -160,8 +160,11 @@ func (e *limitErr) Error() string {
 func main() {
 	tcpPort := flag.Int("tcp", 0, "optional TCP port for FastCGI instead of a Unix socket")
 	deliver := flag.Bool("deliver", false, "read one email from stdin, file it as a submission, and exit (Postfix pipe/aliases helper)")
-	configFile := flag.String("config", "/etc/ftd.conf", "configuration file (postfix-style lowercase key = value)")
+	var configFileV string
+	flag.StringVar(&configFileV, "config", "/etc/ftd.conf", "configuration file (postfix-style lowercase key = value)")
+	flag.StringVar(&configFileV, "c", "/etc/ftd.conf", "shorthand for -config")
 	flag.Parse()
+	configFile := &configFileV
 
 	if *deliver {
 		os.Exit(runDeliver(*configFile))

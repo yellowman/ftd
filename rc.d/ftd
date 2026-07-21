@@ -2,7 +2,11 @@
 # ftd FastCGI form collector
 #
 # All configuration lives in /etc/ftd.conf, loaded by the daemon itself, so
-# this script needs no environment handling.
+# this script needs no environment handling. To run with an alternate
+# configuration file (or any other daemon flag):
+#
+#	rcctl set ftd flags -c /etc/ftd2.conf
+#
 daemon="/usr/local/bin/ftd"
 daemon_flags=${ftd_flags:-""}
 

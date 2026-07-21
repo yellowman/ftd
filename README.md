@@ -177,8 +177,10 @@ development and one-off runs.
 | `reply_lmtp_socket` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
 
 Flags: `-tcp <port>` listens on TCP instead of the Unix socket;
-`-config <path>` selects the configuration file; `-deliver` (with optional
-`-config`) files one email from stdin and exits.
+`-c <path>` (or `-config <path>`) selects the configuration file; `-deliver`
+(with optional `-c`) files one email from stdin and exits. On OpenBSD, pass
+daemon flags through rc.d as usual — e.g. an alternate config:
+`rcctl set ftd flags -c /etc/ftd2.conf`.
 
 ## Using it
 
