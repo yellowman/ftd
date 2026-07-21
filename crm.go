@@ -1297,6 +1297,9 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "From: %s\r\n", s.mailFrom)
 	fmt.Fprintf(&buf, "To: %s\r\n", email)
+	if s.replyTo != "" {
+		fmt.Fprintf(&buf, "Reply-To: %s\r\n", s.replyTo)
+	}
 	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", m.Subject))
 	fmt.Fprintf(&buf, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
 	if unsubURL != "" {

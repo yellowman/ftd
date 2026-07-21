@@ -12,6 +12,7 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
 - Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
 - Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
+- Reply capture: route your Reply-To mailbox into ftd (Postfix LMTP or a pipe helper) and customer replies appear as new to-do submissions linked to their customer record.
 - Rate limiting: 8 submissions/minute per IP with a 1-hour block (both env-tunable), global 5-minute pause on bursts of 30+ distinct IPs. Blocked requests get HTTP 429 with `Retry-After`.
 
 ## Quick start (any platform)
@@ -168,6 +169,8 @@ All configuration is via environment variables:
 | `SMTP_USER` / `SMTP_PASS` | Optional SMTP AUTH (PLAIN; STARTTLS used when offered). | Not set |
 | `MAIL_FROM` | From address for mailings. | Not set |
 | `PUBLIC_BASE_URL` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
+| `REPLY_TO` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
+| `REPLY_LMTP_SOCKET` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
 
 The binary takes one flag: `-tcp <port>` listens on TCP instead of the Unix socket.
 
@@ -228,6 +231,45 @@ customers and hard-bounced addresses (SMTP 5xx) are skipped automatically.
 Bounces can be cleared from the customer page. Async bounces that arrive at
 your relay's return-path mailbox are outside ftd's view — handle those at the
 relay.
+
+**Replies become to-dos** — when a customer answers a mailing, the reply can
+land straight in the submission inbox as a new to-do card, linked to their
+customer record (the text body, decoded subject, and sender are extracted;
+bounces and auto-responders are discarded). Set `REPLY_TO` to the mailbox
+address, then route that address into ftd with Postfix either way:
+
+*LMTP (recommended — Postfix delivers into the running daemon):*
+
+```sh
+# /etc/ftd.env
+REPLY_TO=sales@example.com
+REPLY_LMTP_SOCKET=/var/www/run/ftd-lmtp.sock
+```
+
+```
+# /etc/postfix/main.cf
+transport_maps = hash:/etc/postfix/transport
+# /etc/postfix/transport
+sales@example.com  lmtp:unix:/var/www/run/ftd-lmtp.sock
+```
+
+Run `postmap /etc/postfix/transport && postfix reload`. If your `master.cf`
+runs the `lmtp` agent chrooted (Debian default), either set its chroot column
+to `n` or place the socket under `/var/spool/postfix/` and adjust the path.
+ftd creates the socket mode 0660 — make it connectable by Postfix (e.g.
+`chgrp postfix` on the socket or run the socket directory group-shared).
+
+*Pipe helper (simplest — Postfix invokes ftd per message):*
+
+```
+# /etc/aliases
+sales: "|/usr/local/bin/ftd -deliver"
+```
+
+Run `newaliases`. The helper reads one message on stdin, loads
+`/etc/ftd.env` itself (Postfix strips the environment; override the path with
+`-envfile`), files the reply, and exits with sysexits codes so transient
+database problems are requeued rather than bounced.
 
 **Deliverability** — publish SPF, sign with DKIM at the relay (setups below),
 and set rDNS/PTR for the relay IP, or expect spam-foldering.
@@ -330,6 +372,7 @@ pick a new selector, publish the new TXT record, then switch the signer.
 
 - `main.go` – listener, intake, auth, dashboard, customers.
 - `crm.go` – users, lists, mailings, SMTP sending, tracking endpoints.
+- `inbound.go` – reply ingestion: LMTP listener and the `-deliver` stdin helper.
 - `schema.sql` – idempotent schema; run it for installs *and* upgrades.
 - `templates/`, `static/` – admin UI (embedded into the binary at build time).
 - `sample_form.html`, `sample_form_upload.html` – example forms.

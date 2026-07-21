@@ -81,6 +81,7 @@ type server struct {
 	smtpUser              string
 	smtpPass              string
 	mailFrom              string
+	replyTo               string
 	publicBaseURL         string
 	defaultPasswordActive bool
 }
@@ -158,7 +159,13 @@ func (e *limitErr) Error() string {
 
 func main() {
 	tcpPort := flag.Int("tcp", 0, "optional TCP port for FastCGI instead of a Unix socket")
+	deliver := flag.Bool("deliver", false, "read one email from stdin, file it as a submission, and exit (Postfix pipe/aliases helper)")
+	envFile := flag.String("envfile", "/etc/ftd.env", "environment file loaded by -deliver when variables are unset")
 	flag.Parse()
+
+	if *deliver {
+		os.Exit(runDeliver(*envFile))
+	}
 
 	useTCP := *tcpPort != 0
 
@@ -214,7 +221,9 @@ func main() {
 		ipBlockMinutes = n
 	}
 
-	allowUnix := !useTCP || strings.Contains(dbURL, "host=/")
+	lmtpSock := os.Getenv("REPLY_LMTP_SOCKET")
+
+	allowUnix := !useTCP || strings.Contains(dbURL, "host=/") || lmtpSock != ""
 
 	sessionKey, err := deriveSessionKey()
 	if err != nil {
@@ -223,21 +232,11 @@ func main() {
 
 	secureCookie := os.Getenv("SESSION_COOKIE_INSECURE") == ""
 
-	db, err := sql.Open("postgres", dbURL)
+	db, err := openDB(dbURL)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		log.Fatalf("database: %v", err)
 	}
 	defer db.Close()
-
-	// Keep a single persistent connection so we retain access to the PostgreSQL
-	// socket after chrooting.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-
-	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
-	}
 
 	if err := ensureSchemaPresent(db); err != nil {
 		log.Fatalf("schema verification failed: %v", err)
@@ -267,6 +266,7 @@ func main() {
 		smtpUser:         os.Getenv("SMTP_USER"),
 		smtpPass:         os.Getenv("SMTP_PASS"),
 		mailFrom:         os.Getenv("MAIL_FROM"),
+		replyTo:          os.Getenv("REPLY_TO"),
 		publicBaseURL:    publicBaseURL,
 	}
 
@@ -277,6 +277,21 @@ func main() {
 	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort)
 	if err != nil {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
+	}
+
+	// Optional LMTP listener for inbound replies (created before chroot, like
+	// the FastCGI socket; the fd stays valid afterwards). Access control is the
+	// socket's filesystem permissions — grant the MTA's group connect access.
+	var lmtpListener net.Listener
+	if lmtpSock != "" {
+		_ = os.Remove(lmtpSock)
+		lmtpListener, err = net.Listen("unix", lmtpSock)
+		if err != nil {
+			log.Fatalf("failed to prepare LMTP listener: %v", err)
+		}
+		if err := os.Chmod(lmtpSock, 0660); err != nil {
+			log.Printf("lmtp socket chmod: %v", err)
+		}
 	}
 
 	// Chroot and drop privileges while still unpledged: chroot(2) and the setuid
@@ -298,10 +313,32 @@ func main() {
 		log.Printf("resume stalled mailings: %v", err)
 	}
 
+	if lmtpListener != nil {
+		log.Printf("Accepting inbound replies via LMTP on %s", lmtpSock)
+		go s.serveLMTP(lmtpListener)
+	}
+
 	log.Printf("Starting FastCGI listener for submissions and admin on %s", desc)
 	if err := s.serveFastCGI(listener); err != nil {
 		log.Fatalf("FastCGI server failed: %v", err)
 	}
+}
+
+// openDB opens the PostgreSQL pool pinned to one persistent connection so the
+// daemon retains access to the Postgres socket after chrooting.
+func openDB(dbURL string) (*sql.DB, error) {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return db, nil
 }
 
 func dropPrivilegesIfRoot() error {
