@@ -12,7 +12,7 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
 - Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
 - Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
-- Rate limiting: 4 submissions/minute per IP (24h block), global 5-minute pause on bursts of 30+ distinct IPs.
+- Rate limiting: 8 submissions/minute per IP with a 1-hour block (both env-tunable), global 5-minute pause on bursts of 30+ distinct IPs. Blocked requests get HTTP 429 with `Retry-After`.
 
 ## Quick start (any platform)
 
@@ -162,6 +162,8 @@ All configuration is via environment variables:
 | `SESSION_SECRET` | Signs admin session cookies. Unset = random per-process key (sessions reset on restart). | Generated |
 | `SESSION_COOKIE_INSECURE` | Set to drop the `Secure` cookie flag (plain-HTTP dev only). | Not set |
 | `MAX_UPLOAD_MB` | Max file upload size in MB; `0` disables uploads. | `0` |
+| `RATE_LIMIT_PER_MIN` | Submissions allowed per IP per rolling minute before a block. Size it above the number of forms a legitimate visitor might submit in one sitting. | `8` |
+| `RATE_BLOCK_MINUTES` | How long an IP that exceeds the limit is blocked. | `60` |
 | `SMTP_HOST` / `SMTP_PORT` | SMTP relay for mailings. Sending is disabled until `SMTP_HOST` and `MAIL_FROM` are set. | Not set / `25` |
 | `SMTP_USER` / `SMTP_PASS` | Optional SMTP AUTH (PLAIN; STARTTLS used when offered). | Not set |
 | `MAIL_FROM` | From address for mailings. | Not set |

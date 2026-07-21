@@ -44,16 +44,20 @@ const (
 	csrfCookieName      = "csrf_token"
 	loginCSRFCookieName = "login_csrf"
 	defaultItemsPerPage = 20
-	ipLimitPerMinute    = 4
-	ipBlockDuration     = 24 * time.Hour
-	burstWindow         = time.Minute
-	globalBlockDuration = 5 * time.Minute
-	globalDistinctIPs   = 30
-	maxSubmissionBytes  = 64 * 1024
-	maxFormFields       = 200
-	sessionLifetime     = 24 * time.Hour
-	sessionRefreshAfter = 6 * time.Hour
-	redirectFieldName   = "redirect"
+	// Rate-limit defaults; override with RATE_LIMIT_PER_MIN / RATE_BLOCK_MINUTES.
+	// Generous enough that a legitimate visitor filling several forms on one
+	// site in quick succession is not treated as an attacker, and blocks are a
+	// cooldown rather than a day-long ban.
+	defaultIPLimitPerMinute = 8
+	defaultIPBlockMinutes   = 60
+	burstWindow             = time.Minute
+	globalBlockDuration     = 5 * time.Minute
+	globalDistinctIPs       = 30
+	maxSubmissionBytes      = 64 * 1024
+	maxFormFields           = 200
+	sessionLifetime         = 24 * time.Hour
+	sessionRefreshAfter     = 6 * time.Hour
+	redirectFieldName       = "redirect"
 )
 
 var allowedStatuses = map[string]struct{}{
@@ -71,6 +75,8 @@ type server struct {
 	submitPath            string
 	adminPrefix           string
 	trackPath             string
+	ipLimitPerMinute      int
+	ipBlockDuration       time.Duration
 	smtpAddr              string
 	smtpUser              string
 	smtpPass              string
@@ -191,6 +197,23 @@ func main() {
 		uploadLimitMB = mb
 	}
 
+	ipLimitPerMinute := defaultIPLimitPerMinute
+	if v := os.Getenv("RATE_LIMIT_PER_MIN"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			log.Fatalf("invalid RATE_LIMIT_PER_MIN: %q", v)
+		}
+		ipLimitPerMinute = n
+	}
+	ipBlockMinutes := defaultIPBlockMinutes
+	if v := os.Getenv("RATE_BLOCK_MINUTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			log.Fatalf("invalid RATE_BLOCK_MINUTES: %q", v)
+		}
+		ipBlockMinutes = n
+	}
+
 	allowUnix := !useTCP || strings.Contains(dbURL, "host=/")
 
 	sessionKey, err := deriveSessionKey()
@@ -231,18 +254,20 @@ func main() {
 	uploadLimitBytes := uploadLimitMB * 1024 * 1024
 
 	s := &server{
-		db:            db,
-		sessionKey:    sessionKey,
-		secureCookie:  secureCookie,
-		uploadLimit:   uploadLimitBytes,
-		submitPath:    submitPath,
-		adminPrefix:   adminPrefix,
-		trackPath:     trackPath,
-		smtpAddr:      smtpAddr,
-		smtpUser:      os.Getenv("SMTP_USER"),
-		smtpPass:      os.Getenv("SMTP_PASS"),
-		mailFrom:      os.Getenv("MAIL_FROM"),
-		publicBaseURL: publicBaseURL,
+		db:               db,
+		sessionKey:       sessionKey,
+		secureCookie:     secureCookie,
+		uploadLimit:      uploadLimitBytes,
+		submitPath:       submitPath,
+		adminPrefix:      adminPrefix,
+		trackPath:        trackPath,
+		ipLimitPerMinute: ipLimitPerMinute,
+		ipBlockDuration:  time.Duration(ipBlockMinutes) * time.Minute,
+		smtpAddr:         smtpAddr,
+		smtpUser:         os.Getenv("SMTP_USER"),
+		smtpPass:         os.Getenv("SMTP_PASS"),
+		mailFrom:         os.Getenv("MAIL_FROM"),
+		publicBaseURL:    publicBaseURL,
 	}
 
 	if err := s.refreshDefaultPasswordFlag(context.Background()); err != nil {
@@ -907,15 +932,15 @@ func (s *server) enforceRateLimits(ctx context.Context, ip string) (*limitErr, e
 		return nil, err
 	}
 
-	if recentCount >= ipLimitPerMinute {
-		blockUntil := now.Add(ipBlockDuration)
+	if recentCount >= s.ipLimitPerMinute {
+		blockUntil := now.Add(s.ipBlockDuration)
 		if err := s.setBlock(ctx, "ip", ip, blockUntil); err != nil {
 			return nil, err
 		}
-		log.Printf("blocking ip %s for %s after %d submissions in %s", ip, ipBlockDuration, recentCount, burstWindow)
+		log.Printf("blocking ip %s for %s after %d submissions in %s", ip, s.ipBlockDuration, recentCount, burstWindow)
 		return &limitErr{
 			message:    "rate limit exceeded",
-			retryAfter: ipBlockDuration,
+			retryAfter: s.ipBlockDuration,
 			status:     http.StatusTooManyRequests,
 		}, nil
 	}
