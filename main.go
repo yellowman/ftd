@@ -1843,7 +1843,14 @@ func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
 		page = 1
 	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	// Normalize the tag filter like tag names themselves (lowercase, collapsed
+	// spacing) so hand-typed URLs such as ?tag=VIP match. A value that does not
+	// normalize (invalid characters) is kept as-is: it matches nothing, which
+	// is more honest than silently dropping the filter.
 	tagFilter := strings.TrimSpace(r.URL.Query().Get("tag"))
+	if normalized := normalizeTagName(tagFilter); normalized != "" {
+		tagFilter = normalized
+	}
 
 	customers, total, err := s.listCustomers(r.Context(), q, tagFilter, page, defaultItemsPerPage)
 	if err != nil {
