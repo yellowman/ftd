@@ -709,7 +709,9 @@ func mapMailingFlash(code string) *passwordFlash {
 	case "retrying":
 		return &passwordFlash{Message: "Retrying delivery in the background. Refresh for progress.", Kind: "success"}
 	case "notfailed":
-		return &passwordFlash{Message: "Only failed mailings can be retried.", Kind: "error"}
+		return &passwordFlash{Message: "This mailing cannot be retried right now.", Kind: "error"}
+	case "noretryable":
+		return &passwordFlash{Message: "Nothing to retry — remaining failures are hard-bounced addresses (clear the bounce on the customer page first).", Kind: "error"}
 	default:
 		return nil
 	}
@@ -847,10 +849,28 @@ func (s *server) handleMailingRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomic claim, same pattern as sending a draft: only a failed mailing can
-	// be retried, and only one retry wins.
+	// Both fully-failed and partially-failed ("sent" with failed recipients)
+	// mailings are retryable. Read the current status, then claim it with a
+	// CAS so exactly one retry wins and we can restore the status if there
+	// turns out to be nothing to requeue.
+	var prev string
+	err = s.db.QueryRowContext(r.Context(),
+		`SELECT status FROM mailings WHERE id=$1`, id).Scan(&prev)
+	if err == sql.ErrNoRows {
+		http.Error(w, "mailing not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		log.Printf("mailing retry lookup error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if prev != "failed" && prev != "sent" {
+		http.Redirect(w, r, view+"&msg=notfailed", http.StatusSeeOther)
+		return
+	}
+
 	res, err := s.db.ExecContext(r.Context(),
-		`UPDATE mailings SET status='sending', sent_at=NULL WHERE id=$1 AND status='failed'`, id)
+		`UPDATE mailings SET status='sending' WHERE id=$1 AND status=$2`, id, prev)
 	if err != nil {
 		log.Printf("mailing retry claim error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
@@ -870,6 +890,26 @@ func (s *server) handleMailingRetry(w http.ResponseWriter, r *http.Request) {
 		log.Printf("mailing retry requeue error: %v", err)
 		s.markMailingFailed(r.Context(), id)
 		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Nothing became pending (e.g. every failure is a hard-bounced customer):
+	// release the claim, restoring the prior status, instead of re-finalizing
+	// a no-op delivery run.
+	var pending int
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM mailing_recipients WHERE mailing_id=$1 AND status='pending'`, id).Scan(&pending); err != nil {
+		log.Printf("mailing retry pending count error: %v", err)
+		s.markMailingFailed(r.Context(), id)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if pending == 0 {
+		if _, err := s.db.ExecContext(r.Context(),
+			`UPDATE mailings SET status=$1 WHERE id=$2 AND status='sending'`, prev, id); err != nil {
+			log.Printf("mailing retry restore error: %v", err)
+		}
+		http.Redirect(w, r, view+"&msg=noretryable", http.StatusSeeOther)
 		return
 	}
 

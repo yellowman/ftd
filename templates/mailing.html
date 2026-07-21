@@ -126,16 +126,16 @@
     </section>
     {{end}}
     {{else}}
-    {{if eq .Mailing.Status "failed"}}
+    {{if or (eq .Mailing.Status "failed") (and (eq .Mailing.Status "sent") (gt .Mailing.Failed 0))}}
     <section class="password-card">
       <div>
-        <h2>Delivery failed</h2>
+        <h2>{{if eq .Mailing.Status "failed"}}Delivery failed{{else}}Partial delivery — {{.Mailing.Failed}} recipient(s) failed{{end}}</h2>
         <p>Retry re-sends to recipients that failed transiently or were never attempted. Already-delivered recipients and hard-bounced addresses are skipped.</p>
       </div>
       <form method="post" action="{{.AdminPrefix}}/mailings/retry">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
         <input type="hidden" name="id" value="{{.Mailing.ID}}">
-        <button type="submit">Retry delivery</button>
+        <button type="submit">Retry failed recipients</button>
       </form>
     </section>
     {{end}}
