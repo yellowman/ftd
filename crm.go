@@ -1145,6 +1145,25 @@ func (s *server) resumeStalledMailings(ctx context.Context) error {
 	return nil
 }
 
+// recordRecipient applies a recipient status update with retries. The outcome
+// of an SMTP conversation cannot be rolled back, so the database record must
+// stick even through a transient connection hiccup; a plain single attempt
+// would strand the row in 'sending'. Returns false if every attempt failed.
+func (s *server) recordRecipient(ctx context.Context, mailingID int64, query string, args ...interface{}) bool {
+	delays := []time.Duration{0, time.Second, 5 * time.Second}
+	for i, d := range delays {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			log.Printf("mailing %d: recipient update attempt %d/%d failed: %v", mailingID, i+1, len(delays), err)
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // runMailingSend delivers a mailing's pending recipients one message at a time
 // and finalizes the mailing status. It runs in the background after send is
 // requested; progress is visible in the mailing view as rows update.
@@ -1219,10 +1238,8 @@ func (s *server) runMailingSend(id int64) {
 			if len(truncated) > 500 {
 				truncated = truncated[:500]
 			}
-			if _, dbErr := s.db.ExecContext(ctx,
-				`UPDATE mailing_recipients SET status='failed', error=$1 WHERE id=$2`, truncated, p.id); dbErr != nil {
-				log.Printf("mailing %d: recipient update failed: %v", id, dbErr)
-			}
+			s.recordRecipient(ctx, id,
+				`UPDATE mailing_recipients SET status='failed', error=$1 WHERE id=$2`, truncated, p.id)
 			// A permanent rejection marks the customer as bounced so future
 			// mailings skip the address (clearable from the customer page).
 			if p.customerID.Valid && isHardSMTPError(err) {
@@ -1235,9 +1252,12 @@ func (s *server) runMailingSend(id int64) {
 			continue
 		}
 		sent++
-		if _, dbErr := s.db.ExecContext(ctx,
-			`UPDATE mailing_recipients SET status='sent', sent_at=NOW() WHERE id=$1`, p.id); dbErr != nil {
-			log.Printf("mailing %d: recipient update failed: %v", id, dbErr)
+		// The message is irrevocably handed to the relay; failing to record
+		// that would leave the row in 'sending', and a later resume would
+		// requeue it and deliver a duplicate. recordRecipient retries hard.
+		if !s.recordRecipient(ctx, id,
+			`UPDATE mailing_recipients SET status='sent', sent_at=NOW() WHERE id=$1`, p.id) {
+			log.Printf("mailing %d: CRITICAL: delivered to %s but could not record it; row left in 'sending' — a resume/retry may deliver a duplicate", id, p.email)
 		}
 	}
 
