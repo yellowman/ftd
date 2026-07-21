@@ -274,6 +274,7 @@ func (s *server) lmtpSession(conn net.Conn) {
 			}
 			say("354 go ahead")
 			var b strings.Builder
+			overflow := false
 			for {
 				dl, err := r.ReadString('\n')
 				if err != nil {
@@ -289,7 +290,21 @@ func (s *server) lmtpSession(conn net.Conn) {
 				}
 				if b.Len()+len(trimmed) < maxInboundBytes {
 					b.WriteString(trimmed + "\r\n")
+				} else {
+					// Keep consuming to the terminating dot so the protocol
+					// stays in sync, but the message must be refused: storing
+					// a silently truncated (possibly mid-MIME) reply while
+					// telling the MTA "delivered" would lose content.
+					overflow = true
 				}
+			}
+			if overflow {
+				log.Printf("lmtp: message exceeds %d bytes; refused", maxInboundBytes)
+				for i := 0; i < rcpts; i++ {
+					say("552 5.3.4 message exceeds size limit")
+				}
+				rcpts = 0
+				continue
 			}
 			err := s.handleInbound(context.Background(), []byte(b.String()))
 			// LMTP: one status line per accepted RCPT.
@@ -334,13 +349,19 @@ func runDeliver(configFile string) int {
 		return exTempFail
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxInboundBytes))
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxInboundBytes+1))
 	if err != nil {
 		log.Printf("deliver: read stdin: %v", err)
 		return exTempFail
 	}
 	if len(raw) == 0 {
 		log.Print("deliver: empty message")
+		return exUnavailable
+	}
+	if len(raw) > maxInboundBytes {
+		// Refuse rather than store a silently truncated message; permanent
+		// failure so Postfix bounces instead of retrying forever.
+		log.Printf("deliver: message exceeds %d bytes; refused", maxInboundBytes)
 		return exUnavailable
 	}
 
