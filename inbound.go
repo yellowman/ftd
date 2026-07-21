@@ -196,10 +196,15 @@ func (s *server) storeReply(ctx context.Context, im *inboundMail) error {
 	return nil
 }
 
+// errBadMessage marks permanently malformed input: the same bytes will fail
+// on every retry, so the MTA must bounce it, not requeue it. Transient errors
+// (database unavailable) stay unwrapped and get temporary-failure codes.
+var errBadMessage = errors.New("unparseable message")
+
 func (s *server) handleInbound(ctx context.Context, raw []byte) error {
 	im, err := parseInboundMail(raw)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errBadMessage, err)
 	}
 	if im.Drop != "" {
 		log.Printf("inbound mail discarded (%s)", im.Drop)
@@ -354,13 +359,19 @@ func (s *server) lmtpSession(conn net.Conn) {
 				continue
 			}
 			err := s.handleInbound(context.Background(), []byte(b.String()))
-			// LMTP: one status line per accepted RCPT.
+			// LMTP: one status line per accepted RCPT. Permanent errors get a
+			// 5xx so the MTA bounces instead of retrying forever; transient
+			// (database) errors get 451 and a later retry succeeds.
 			for i := 0; i < rcpts; i++ {
-				if err != nil {
+				switch {
+				case err == nil:
+					say("250 2.0.0 delivered")
+				case errors.Is(err, errBadMessage):
+					log.Printf("lmtp delivery rejected: %v", err)
+					say("554 5.6.0 message cannot be parsed")
+				default:
 					log.Printf("lmtp delivery error: %v", err)
 					say("451 4.3.0 temporary failure")
-				} else {
-					say("250 2.0.0 delivered")
 				}
 			}
 			rcpts = 0
@@ -422,6 +433,10 @@ func runDeliver(configFile string) int {
 	s := &server{db: db}
 	if err := s.handleInbound(context.Background(), raw); err != nil {
 		log.Printf("deliver: %v", err)
+		if errors.Is(err, errBadMessage) {
+			// Permanently malformed: bounce, don't requeue.
+			return exUnavailable
+		}
 		return exTempFail
 	}
 	return 0
