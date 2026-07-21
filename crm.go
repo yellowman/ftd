@@ -565,10 +565,25 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Recipient stats + rows for non-draft mailings.
+	// Recipient stats + rows for non-draft mailings. Summary counts come from
+	// a dedicated aggregate over every row; the LIMIT below caps only the
+	// displayed table, so large campaigns still report true totals.
 	recipients := []Recipient{}
 	mailingLinks := []MailingLink{}
 	if m.Status != "draft" {
+		if err := s.db.QueryRowContext(r.Context(),
+			`SELECT COUNT(*),
+			    COUNT(*) FILTER (WHERE status = 'sent'),
+			    COUNT(*) FILTER (WHERE status = 'failed'),
+			    COUNT(*) FILTER (WHERE opened_at IS NOT NULL),
+			    COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)
+			 FROM mailing_recipients WHERE mailing_id=$1`, id,
+		).Scan(&m.Total, &m.Sent, &m.Failed, &m.Opened, &m.Clicked); err != nil {
+			log.Printf("recipient stats error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+
 		rows, err := s.db.QueryContext(r.Context(),
 			`SELECT id, customer_id, email, status, error, sent_at, opened_at, open_count, clicked_at, click_count
 			 FROM mailing_recipients WHERE mailing_id=$1 ORDER BY email LIMIT 2000`, id)
@@ -584,19 +599,6 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 				log.Printf("scan recipient error: %v", err)
 				http.Error(w, "server error", http.StatusInternalServerError)
 				return
-			}
-			m.Total++
-			switch rc.Status {
-			case "sent":
-				m.Sent++
-			case "failed":
-				m.Failed++
-			}
-			if rc.OpenedAt.Valid {
-				m.Opened++
-			}
-			if rc.ClickedAt.Valid {
-				m.Clicked++
 			}
 			recipients = append(recipients, rc)
 		}

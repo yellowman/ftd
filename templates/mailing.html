@@ -158,6 +158,9 @@
           {{end}}
         </tbody>
       </table>
+      {{if lt (len .Recipients) .Mailing.Total}}
+      <p class="hint">Showing the first {{len .Recipients}} of {{.Mailing.Total}} recipients; the summary above covers all of them.</p>
+      {{end}}
     </section>
 
     {{if .Links}}
