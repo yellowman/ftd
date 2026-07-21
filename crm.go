@@ -884,6 +884,19 @@ func (s *server) handleMailingRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// On any failure past this point, put the status back the way we found
+	// it. Forcing 'failed' here would misreport a partially delivered
+	// campaign ('sent' with some failed recipients) as entirely failed just
+	// because the retry attempt errored. If even the restore fails, the
+	// mailing stays 'sending' and startup resume finalizes it from database
+	// truth.
+	restore := func() {
+		if _, err := s.db.ExecContext(r.Context(),
+			`UPDATE mailings SET status=$1 WHERE id=$2 AND status='sending'`, prev, id); err != nil {
+			log.Printf("mailing retry restore error: %v", err)
+		}
+	}
+
 	// Requeue transient failures; leave hard-bounced customers suppressed.
 	if _, err := s.db.ExecContext(r.Context(),
 		`UPDATE mailing_recipients mr SET status='pending', error=NULL
@@ -891,7 +904,7 @@ func (s *server) handleMailingRetry(w http.ResponseWriter, r *http.Request) {
 		   AND NOT EXISTS (SELECT 1 FROM customers c WHERE c.id = mr.customer_id AND c.bounced_at IS NOT NULL)`,
 		id); err != nil {
 		log.Printf("mailing retry requeue error: %v", err)
-		s.markMailingFailed(r.Context(), id)
+		restore()
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -903,15 +916,12 @@ func (s *server) handleMailingRetry(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM mailing_recipients WHERE mailing_id=$1 AND status='pending'`, id).Scan(&pending); err != nil {
 		log.Printf("mailing retry pending count error: %v", err)
-		s.markMailingFailed(r.Context(), id)
+		restore()
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
 	if pending == 0 {
-		if _, err := s.db.ExecContext(r.Context(),
-			`UPDATE mailings SET status=$1 WHERE id=$2 AND status='sending'`, prev, id); err != nil {
-			log.Printf("mailing retry restore error: %v", err)
-		}
+		restore()
 		http.Redirect(w, r, view+"&msg=noretryable", http.StatusSeeOther)
 		return
 	}
