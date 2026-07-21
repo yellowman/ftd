@@ -2369,10 +2369,7 @@ func (s *server) handleMediaUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	back := s.adminPath("/mailings")
-	if ref := r.Header.Get("Referer"); strings.HasPrefix(ref, s.adminPrefix) {
-		back = ref
-	}
+	back := s.adminReferer(r, s.adminPath("/mailings"))
 
 	ctype := r.Header.Get("Content-Type")
 	if !strings.Contains(ctype, "multipart/form-data") {

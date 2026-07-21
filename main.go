@@ -1430,12 +1430,7 @@ func (s *server) handleArchiveCompleted(w http.ResponseWriter, r *http.Request) 
 		log.Printf("archived %d completed submissions", n)
 	}
 
-	target := r.Referer()
-	if !strings.HasPrefix(target, s.adminPrefix) {
-		target = s.adminPath("/")
-	}
-
-	http.Redirect(w, r, target, http.StatusSeeOther)
+	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
 }
 
 func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -1561,12 +1556,7 @@ func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := r.Referer()
-	if !strings.HasPrefix(target, s.adminPrefix) {
-		target = s.adminPath("/")
-	}
-
-	http.Redirect(w, r, target, http.StatusSeeOther)
+	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
 }
 
 func (s *server) listSubmissions(ctx context.Context, status string, page, pageSize int, excludeArchived bool) ([]Submission, int, error) {
@@ -2103,6 +2093,27 @@ func normalizePath(val, def string) string {
 		val = "/"
 	}
 	return val
+}
+
+// adminReferer derives a same-site redirect target from the request's Referer,
+// falling back when it is absent or points outside the admin. Browsers send an
+// absolute URL, so the admin-prefix check must run against the path component;
+// only the path and query are returned, keeping the redirect relative even if
+// the header is forged.
+func (s *server) adminReferer(r *http.Request, fallback string) string {
+	ref := r.Referer()
+	if ref == "" {
+		return fallback
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.HasPrefix(u.Path, s.adminPrefix) {
+		return fallback
+	}
+	target := u.Path
+	if u.RawQuery != "" {
+		target += "?" + u.RawQuery
+	}
+	return target
 }
 
 func (s *server) adminPath(suffix string) string {
