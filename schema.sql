@@ -132,6 +132,23 @@ CREATE TABLE IF NOT EXISTS activities (
 
 CREATE INDEX IF NOT EXISTS activities_customer_idx ON activities (customer_id, created_at DESC);
 
+-- Reply ingestion idempotency: the MTA retries deliveries after a lost
+-- acknowledgment, so replies are deduplicated on their Message-ID (or a
+-- content hash when absent). Deduplicates first so upgrades of databases
+-- holding pre-existing duplicates succeed.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'submissions_reply_msgid_uidx') THEN
+        DELETE FROM submissions a USING submissions b
+            WHERE a.user_agent = 'email-reply' AND b.user_agent = 'email-reply'
+              AND a.form_data->>'_reply_message_id' IS NOT NULL
+              AND a.form_data->>'_reply_message_id' = b.form_data->>'_reply_message_id'
+              AND a.id > b.id;
+        CREATE UNIQUE INDEX submissions_reply_msgid_uidx
+            ON submissions ((form_data->>'_reply_message_id'))
+            WHERE user_agent = 'email-reply' AND form_data->>'_reply_message_id' IS NOT NULL;
+    END IF;
+END $$;
+
 -- Normalized tag vocabulary. Tag names are stored lowercase; customer_tags.source
 -- records how the association was made (manually, declared by a submitted form,
 -- inherited from a clicked mailing link, or CSV import).

@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,10 +33,11 @@ const (
 )
 
 type inboundMail struct {
-	From    string
-	Subject string
-	Body    string
-	Drop    string // non-empty: reason this message should be discarded
+	From      string
+	Subject   string
+	Body      string
+	MessageID string // Message-ID header, or a content hash when absent
+	Drop      string // non-empty: reason this message should be discarded
 }
 
 // decodeCTE wraps a part reader according to its Content-Transfer-Encoding.
@@ -136,6 +139,15 @@ func parseInboundMail(raw []byte) (*inboundMail, error) {
 		im.Subject = msg.Header.Get("Subject")
 	}
 
+	// Dedupe key: the Message-ID, or a hash of the raw message when a broken
+	// sender omits one. MTA retries after a lost acknowledgment redeliver the
+	// same message; this key lets storeReply file it exactly once.
+	im.MessageID = strings.Trim(strings.TrimSpace(msg.Header.Get("Message-ID")), "<>")
+	if im.MessageID == "" {
+		sum := sha256.Sum256(raw)
+		im.MessageID = "sha256:" + hex.EncodeToString(sum[:])
+	}
+
 	body := findTextPart(msg.Header.Get("Content-Type"),
 		msg.Header.Get("Content-Transfer-Encoding"), msg.Body, 0)
 	body = strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
@@ -148,13 +160,17 @@ func parseInboundMail(raw []byte) (*inboundMail, error) {
 }
 
 // storeReply files an inbound message as a submission linked to the sender's
-// customer record (created if new, like form intake).
+// customer record (created if new, like form intake). Filing is idempotent on
+// the message's dedupe key: a redelivery of an already-stored message is
+// acknowledged as success without creating a second to-do, backed by a
+// partial unique index so even concurrent redeliveries cannot double-file.
 func (s *server) storeReply(ctx context.Context, im *inboundMail) error {
 	payload := map[string]interface{}{
-		"email":          im.From,
-		"_reply_from":    im.From,
-		"_reply_subject": im.Subject,
-		"_reply_body":    im.Body,
+		"email":             im.From,
+		"_reply_from":       im.From,
+		"_reply_subject":    im.Subject,
+		"_reply_body":       im.Body,
+		"_reply_message_id": im.MessageID,
 	}
 
 	customerID := s.linkCustomer(ctx, payload)
@@ -163,10 +179,18 @@ func (s *server) storeReply(ctx context.Context, im *inboundMail) error {
 	if err != nil {
 		return fmt.Errorf("marshal reply: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO submissions (ip_address, user_agent, referer, form_data, customer_id)
-		 VALUES (NULL, 'email-reply', NULL, $1, $2)`, formJSON, customerID); err != nil {
+		 VALUES (NULL, 'email-reply', NULL, $1, $2)
+		 ON CONFLICT ((form_data->>'_reply_message_id'))
+		     WHERE user_agent = 'email-reply' AND form_data->>'_reply_message_id' IS NOT NULL
+		     DO NOTHING`, formJSON, customerID)
+	if err != nil {
 		return fmt.Errorf("insert reply: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		log.Printf("duplicate delivery of %s from %s ignored", im.MessageID, im.From)
+		return nil
 	}
 	log.Printf("reply filed from %s (%q)", im.From, im.Subject)
 	return nil
