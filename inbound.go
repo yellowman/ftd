@@ -240,9 +240,44 @@ func (s *server) serveLMTP(l net.Listener) {
 	}
 }
 
+// lmtpMaxLine bounds a single protocol or content line (RFC 5321 allows 998
+// content chars; the headroom tolerates sloppy senders). Memory per session is
+// bounded per line and per message — deliberately not per connection: the MTA
+// reuses one session for many deliveries, so a connection-lifetime cap would
+// start failing healthy deliveries once enough cumulative bytes had passed.
+const lmtpMaxLine = 4096
+
+// readLMTPLine reads one newline-terminated line, retaining at most max bytes.
+// An overlong line is consumed to its end (keeping the protocol in sync) and
+// reported via tooLong so the caller can refuse it cleanly.
+func readLMTPLine(r *bufio.Reader, max int) (line string, tooLong bool, err error) {
+	var b strings.Builder
+	for {
+		frag, err := r.ReadSlice('\n')
+		if len(frag) > 0 {
+			if b.Len() < max {
+				n := max - b.Len()
+				if n > len(frag) {
+					n = len(frag)
+				}
+				b.Write(frag[:n])
+				if n < len(frag) {
+					tooLong = true
+				}
+			} else {
+				tooLong = true
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return b.String(), tooLong, err
+	}
+}
+
 func (s *server) lmtpSession(conn net.Conn) {
 	defer conn.Close()
-	r := bufio.NewReader(io.LimitReader(conn, 4*maxInboundBytes))
+	r := bufio.NewReaderSize(conn, lmtpMaxLine)
 	w := bufio.NewWriter(conn)
 	say := func(line string) {
 		_, _ = w.WriteString(line + "\r\n")
@@ -252,9 +287,13 @@ func (s *server) lmtpSession(conn net.Conn) {
 	say("220 ftd LMTP ready")
 	rcpts := 0
 	for {
-		line, err := r.ReadString('\n')
+		line, tooLong, err := readLMTPLine(r, lmtpMaxLine)
 		if err != nil {
 			return
+		}
+		if tooLong {
+			say("500 5.5.2 line too long")
+			continue
 		}
 		cmd := strings.ToUpper(strings.TrimSpace(line))
 		switch {
@@ -276,9 +315,15 @@ func (s *server) lmtpSession(conn net.Conn) {
 			var b strings.Builder
 			overflow := false
 			for {
-				dl, err := r.ReadString('\n')
+				dl, lineTooLong, err := readLMTPLine(r, lmtpMaxLine)
 				if err != nil {
 					return
+				}
+				if lineTooLong {
+					// Content line beyond RFC limits: refuse the message but
+					// keep consuming to the terminating dot.
+					overflow = true
+					continue
 				}
 				trimmed := strings.TrimRight(dl, "\r\n")
 				if trimmed == "." {
