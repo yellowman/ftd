@@ -80,7 +80,12 @@
         <div class="meta">
           <div class="meta-top">
             <span class="id-pill">#{{.ID}}</span>
-            <span class="status-pill {{.Status}}">{{.Status}}</span>
+            <span class="meta-top-links">
+              {{if .CustomerID.Valid}}
+              <a class="assoc" href="{{$.AdminPrefix}}/customers/view?id={{.CustomerID.Int64}}">&#9679; {{if .CustomerName.Valid}}{{.CustomerName.String}}{{else}}{{.CustomerEmail.String}}{{end}}</a>
+              {{end}}
+              <span class="status-pill {{.Status}}">{{.Status}}</span>
+            </span>
           </div>
           <div class="meta-bottom">
             <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>

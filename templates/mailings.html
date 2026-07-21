@@ -57,7 +57,7 @@
           <tr>
             <td><a href="{{$.AdminPrefix}}/mailings/view?id={{.ID}}">{{.Subject}}</a></td>
             <td><span class="status-pill {{.Status}}">{{.Status}}</span></td>
-            <td>{{if .ListName.Valid}}{{.ListName.String}}{{else}}All customers{{end}}</td>
+            <td>{{if .ListID.Valid}}<a class="assoc" href="{{$.AdminPrefix}}/lists/view?id={{.ListID.Int64}}">{{.ListName.String}}</a>{{else}}All customers{{end}}</td>
             <td>{{.Total}}</td>
             <td>{{.Opened}}</td>
             <td>{{.CreatedBy.String}}</td>

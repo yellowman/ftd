@@ -54,7 +54,7 @@
       <div>
         <div class="chip-row">
           {{range .TagChips}}
-          <span class="tag-chip src-{{.Source}}" title="source: {{.Source}}">{{.Name}}
+          <span class="tag-chip src-{{.Source}}" title="source: {{.Source}}"><a href="{{$.AdminPrefix}}/customers?tag={{.Name}}">{{.Name}}</a>
             <form method="post" action="{{$.AdminPrefix}}/customers/tag" class="inline-form">
               <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
               <input type="hidden" name="id" value="{{$.Customer.ID}}">
@@ -67,6 +67,14 @@
           <span class="hint">No tags yet.</span>
           {{end}}
         </div>
+        {{if .MemberOf}}
+        <div class="chip-row assoc-row">
+          <span class="assoc-label">Lists:</span>
+          {{range .MemberOf}}
+          <a class="assoc" href="{{$.AdminPrefix}}/lists/view?id={{.ID}}">{{.Name}}</a>
+          {{end}}
+        </div>
+        {{end}}
         <form method="post" action="{{.AdminPrefix}}/customers/tag" class="chip-add">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
           <input type="hidden" name="id" value="{{.Customer.ID}}">
@@ -125,7 +133,7 @@
           <tr>
             <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
             <td><span class="status-pill {{if eq .Kind "mailing"}}sent{{else}}new{{end}}">{{.Kind}}</span></td>
-            <td class="timeline-body">{{.Body}}</td>
+            <td class="timeline-body">{{if .RefID.Valid}}<a href="{{$.AdminPrefix}}/mailings/view?id={{.RefID.Int64}}">{{.Body}}</a>{{else}}{{.Body}}{{end}}</td>
             <td>{{.CreatedBy.String}}</td>
           </tr>
           {{end}}

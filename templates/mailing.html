@@ -11,7 +11,9 @@
       <div>
         <p class="eyebrow">ftd · CRM</p>
         <h1>{{.Mailing.Subject}}</h1>
-        <p class="lede">Mailing #{{.Mailing.ID}} · <span class="status-pill {{.Mailing.Status}}">{{.Mailing.Status}}</span>{{if .Mailing.SentAt.Valid}} · sent {{.Mailing.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}{{if .Mailing.CreatedBy.Valid}} · by {{.Mailing.CreatedBy.String}}{{end}}{{if .Mailing.Tags.Valid}} · tags: {{.Mailing.Tags.String}}{{end}}</p>
+        <p class="lede">Mailing #{{.Mailing.ID}} · <span class="status-pill {{.Mailing.Status}}">{{.Mailing.Status}}</span>{{if .Mailing.SentAt.Valid}} · sent {{.Mailing.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}{{if .Mailing.CreatedBy.Valid}} · by {{.Mailing.CreatedBy.String}}{{end}}
+          {{if .Mailing.ListID.Valid}}· <a class="assoc" href="{{.AdminPrefix}}/lists/view?id={{.Mailing.ListID.Int64}}">{{.Mailing.ListName.String}}</a>{{end}}
+          {{range .TagList}}<a class="assoc" href="{{$.AdminPrefix}}/customers?tag={{.}}">{{.}}</a> {{end}}</p>
       </div>
       <div class="actions">
         <nav class="tabs">
@@ -145,7 +147,7 @@
         <tbody>
           {{range .Recipients}}
           <tr>
-            <td>{{.Email}}</td>
+            <td>{{if .CustomerID.Valid}}<a href="{{$.AdminPrefix}}/customers/view?id={{.CustomerID.Int64}}">{{.Email}}</a>{{else}}{{.Email}}{{end}}</td>
             <td><span class="status-pill {{if eq .Status "sent"}}complete{{else if eq .Status "failed"}}failed{{else if eq .Status "sending"}}sending{{else}}new{{end}}">{{.Status}}</span></td>
             <td>{{if .SentAt.Valid}}{{.SentAt.Time.Format "15:04:05"}}{{end}}</td>
             <td>{{if .OpenedAt.Valid}}{{.OpenedAt.Time.Format "2006-01-02 15:04"}}{{end}}</td>

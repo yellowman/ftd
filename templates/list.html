@@ -66,6 +66,24 @@
       </div>
     </section>
 
+    {{if .Mailings}}
+    <section class="customers">
+      <h2>Mailings targeted at this list</h2>
+      <table class="table">
+        <thead><tr><th>Subject</th><th>Status</th><th>Sent</th></tr></thead>
+        <tbody>
+          {{range .Mailings}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/mailings/view?id={{.ID}}">{{.Subject}}</a></td>
+            <td><span class="status-pill {{.Status}}">{{.Status}}</span></td>
+            <td>{{if .SentAt.Valid}}{{.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+
     <section class="customers">
       {{if not .Members}}
       <p>No members yet.</p>

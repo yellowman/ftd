@@ -89,7 +89,7 @@
             <td><a href="{{$.AdminPrefix}}/customers/view?id={{.ID}}">{{if .Name.Valid}}{{.Name.String}}{{else}}—{{end}}</a></td>
             <td>{{.Email.String}}</td>
             <td>{{.Company.String}}</td>
-            <td class="tags-cell">{{.Tags.String}}</td>
+            <td class="tags-cell">{{range .TagsList}}<a class="assoc" href="{{$.AdminPrefix}}/customers?tag={{.}}">{{.}}</a> {{end}}</td>
             <td>{{.SubmissionCount}}</td>
             <td>
               {{if .UnsubscribedAt.Valid}}<span class="status-pill archived">unsubscribed</span>{{end}}

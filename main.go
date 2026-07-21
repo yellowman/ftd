@@ -87,18 +87,21 @@ const (
 )
 
 type Submission struct {
-	ID           int64
-	SubmittedAt  time.Time
-	IP           sql.NullString
-	ForwardedFor sql.NullString
-	UserAgent    sql.NullString
-	Referer      sql.NullString
-	Status       string
-	FilePath     sql.NullString
-	Comment      sql.NullString
-	FormData     json.RawMessage
-	FormPretty   string
-	Fields       []FieldEntry
+	ID            int64
+	SubmittedAt   time.Time
+	IP            sql.NullString
+	ForwardedFor  sql.NullString
+	UserAgent     sql.NullString
+	Referer       sql.NullString
+	Status        string
+	FilePath      sql.NullString
+	Comment       sql.NullString
+	FormData      json.RawMessage
+	FormPretty    string
+	Fields        []FieldEntry
+	CustomerID    sql.NullInt64
+	CustomerName  sql.NullString
+	CustomerEmail sql.NullString
 }
 
 type FieldEntry struct {
@@ -120,6 +123,7 @@ type Customer struct {
 	UnsubscribedAt  sql.NullTime
 	BouncedAt       sql.NullTime
 	SubmissionCount int
+	TagsList        []string
 }
 
 type passwordFlash struct {
@@ -1470,16 +1474,18 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	offset := (page - 1) * pageSize
 
 	args := []interface{}{}
-	query := `SELECT id, submitted_at, ip_address, forwarded_for, user_agent, referer, status, file_path, comment, form_data FROM submissions`
-	countQuery := `SELECT COUNT(*) FROM submissions`
+	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, c.name, c.email
+	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id`
+	countQuery := `SELECT COUNT(*) FROM submissions sub`
 
 	whereClauses := []string{}
 	if status != "" {
-		query += " WHERE status = $1"
-		countQuery += " WHERE status = $1"
+		query += " WHERE sub.status = $1"
+		countQuery += " WHERE sub.status = $1"
 		args = append(args, status)
 	} else if excludeArchived {
-		whereClauses = append(whereClauses, "status <> 'archived'")
+		whereClauses = append(whereClauses, "sub.status <> 'archived'")
 	}
 
 	if len(whereClauses) > 0 && status == "" {
@@ -1487,7 +1493,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 		countQuery += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	query += " ORDER BY submitted_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
+	query += " ORDER BY sub.submitted_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
 	args = append(args, pageSize, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1499,7 +1505,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	submissions := []Submission{}
 	for rows.Next() {
 		var sub Submission
-		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.CustomerName, &sub.CustomerEmail); err != nil {
 			return nil, 0, err
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
@@ -1624,6 +1630,9 @@ func (s *server) listCustomers(ctx context.Context, q, tagFilter string, page, p
 		var c Customer
 		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt, &c.SubmissionCount, &c.Tags); err != nil {
 			return nil, 0, err
+		}
+		if c.Tags.Valid {
+			c.TagsList = splitTagList(c.Tags.String)
 		}
 		customers = append(customers, c)
 	}
@@ -1826,6 +1835,13 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	memberOf, err := s.customerLists(r.Context(), id)
+	if err != nil {
+		log.Printf("customer lists error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	data := map[string]interface{}{
 		"Customer":    customer,
 		"Submissions": subs,
@@ -1833,6 +1849,7 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 		"TagChips":    chips,
 		"AllTags":     allTags,
 		"Clicks":      clicks,
+		"MemberOf":    memberOf,
 		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
 		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
 		"AdminPrefix": s.adminPrefix,

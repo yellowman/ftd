@@ -308,10 +308,18 @@ func (s *server) handleListView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mailings, err := s.listMailings(r.Context(), id)
+	if err != nil {
+		log.Printf("list mailings error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	renderTemplate(w, "templates/list.html", map[string]interface{}{
 		"List":        list,
 		"Members":     members,
 		"AllTags":     allTags,
+		"Mailings":    mailings,
 		"Flash":       msgs,
 		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
 		"AdminPrefix": s.adminPrefix,
@@ -411,6 +419,7 @@ type Mailing struct {
 
 type Recipient struct {
 	ID         int64
+	CustomerID sql.NullInt64
 	Email      string
 	Status     string
 	Error      sql.NullString
@@ -482,7 +491,7 @@ func (s *server) handleMailings(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) renderMailings(w http.ResponseWriter, r *http.Request, flash *passwordFlash) {
 	rows, err := s.db.QueryContext(r.Context(),
-		`SELECT m.id, m.subject, m.status, m.created_by, m.created_at, m.sent_at, l.name,
+		`SELECT m.id, m.subject, m.status, m.created_by, m.created_at, m.sent_at, m.list_id, l.name,
 		    (SELECT COUNT(*) FROM mailing_recipients mr WHERE mr.mailing_id = m.id),
 		    (SELECT COUNT(*) FROM mailing_recipients mr WHERE mr.mailing_id = m.id AND mr.opened_at IS NOT NULL)
 		 FROM mailings m LEFT JOIN lists l ON l.id = m.list_id
@@ -496,7 +505,7 @@ func (s *server) renderMailings(w http.ResponseWriter, r *http.Request, flash *p
 	mailings := []Mailing{}
 	for rows.Next() {
 		var m Mailing
-		if err := rows.Scan(&m.ID, &m.Subject, &m.Status, &m.CreatedBy, &m.CreatedAt, &m.SentAt, &m.ListName, &m.Total, &m.Opened); err != nil {
+		if err := rows.Scan(&m.ID, &m.Subject, &m.Status, &m.CreatedBy, &m.CreatedAt, &m.SentAt, &m.ListID, &m.ListName, &m.Total, &m.Opened); err != nil {
 			log.Printf("scan mailing error: %v", err)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
@@ -559,7 +568,7 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 	mailingLinks := []MailingLink{}
 	if m.Status != "draft" {
 		rows, err := s.db.QueryContext(r.Context(),
-			`SELECT id, email, status, error, sent_at, opened_at, open_count, clicked_at, click_count
+			`SELECT id, customer_id, email, status, error, sent_at, opened_at, open_count, clicked_at, click_count
 			 FROM mailing_recipients WHERE mailing_id=$1 ORDER BY email LIMIT 2000`, id)
 		if err != nil {
 			log.Printf("recipients error: %v", err)
@@ -569,7 +578,7 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		for rows.Next() {
 			var rc Recipient
-			if err := rows.Scan(&rc.ID, &rc.Email, &rc.Status, &rc.Error, &rc.SentAt, &rc.OpenedAt, &rc.OpenCount, &rc.ClickedAt, &rc.ClickCount); err != nil {
+			if err := rows.Scan(&rc.ID, &rc.CustomerID, &rc.Email, &rc.Status, &rc.Error, &rc.SentAt, &rc.OpenedAt, &rc.OpenCount, &rc.ClickedAt, &rc.ClickCount); err != nil {
 				log.Printf("scan recipient error: %v", err)
 				http.Error(w, "server error", http.StatusInternalServerError)
 				return
@@ -656,8 +665,14 @@ func (s *server) handleMailingView(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	tagList := []string{}
+	if m.Tags.Valid {
+		tagList = splitTagList(m.Tags.String)
+	}
+
 	renderTemplate(w, "templates/mailing.html", map[string]interface{}{
 		"Mailing":         m,
+		"TagList":         tagList,
 		"Recipients":      recipients,
 		"Links":           mailingLinks,
 		"Lists":           lists,
@@ -1572,20 +1587,22 @@ type TimelineEntry struct {
 	Body      string
 	CreatedBy sql.NullString
 	CreatedAt time.Time
+	RefID     sql.NullInt64 // mailing id for kind="mailing" entries
 }
 
 // loadTimeline merges manual activities with mailing deliveries for a customer,
 // newest first.
 func (s *server) loadTimeline(ctx context.Context, customerID int64) ([]TimelineEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kind, body, created_by, created_at FROM activities WHERE customer_id = $1
+		`SELECT kind, body, created_by, created_at, NULL::integer AS ref_id
+		 FROM activities WHERE customer_id = $1
 		 UNION ALL
 		 SELECT 'mailing',
 		     m.subject || CASE
 		         WHEN mr.clicked_at IS NOT NULL THEN ' (clicked)'
 		         WHEN mr.opened_at IS NOT NULL THEN ' (opened)'
 		         ELSE '' END,
-		     m.created_by, mr.sent_at
+		     m.created_by, mr.sent_at, m.id
 		 FROM mailing_recipients mr JOIN mailings m ON m.id = mr.mailing_id
 		 WHERE mr.customer_id = $1 AND mr.sent_at IS NOT NULL
 		 ORDER BY created_at DESC LIMIT 200`, customerID)
@@ -1596,7 +1613,7 @@ func (s *server) loadTimeline(ctx context.Context, customerID int64) ([]Timeline
 	entries := []TimelineEntry{}
 	for rows.Next() {
 		var e TimelineEntry
-		if err := rows.Scan(&e.Kind, &e.Body, &e.CreatedBy, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Kind, &e.Body, &e.CreatedBy, &e.CreatedAt, &e.RefID); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
@@ -2419,4 +2436,47 @@ func unescapeEntities(s string) string {
 		s = strings.ReplaceAll(s, r.from, r.to)
 	}
 	return s
+}
+
+// ---- Association queries (the "everything links" layer) ---------------------
+
+// customerLists returns the lists a customer belongs to.
+func (s *server) customerLists(ctx context.Context, customerID int64) ([]List, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT l.id, l.name FROM lists l
+		 JOIN list_members lm ON lm.list_id = l.id
+		 WHERE lm.customer_id = $1 ORDER BY l.name`, customerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	lists := []List{}
+	for rows.Next() {
+		var l List
+		if err := rows.Scan(&l.ID, &l.Name); err != nil {
+			return nil, err
+		}
+		lists = append(lists, l)
+	}
+	return lists, rows.Err()
+}
+
+// listMailings returns mailings targeted at a list.
+func (s *server) listMailings(ctx context.Context, listID int64) ([]Mailing, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, subject, status, created_at, sent_at FROM mailings
+		 WHERE list_id = $1 ORDER BY created_at DESC LIMIT 50`, listID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Mailing{}
+	for rows.Next() {
+		var m Mailing
+		if err := rows.Scan(&m.ID, &m.Subject, &m.Status, &m.CreatedAt, &m.SentAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
