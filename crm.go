@@ -1960,6 +1960,24 @@ func (s *server) handleCustomerImport(w http.ResponseWriter, r *http.Request) {
 		if tags := splitTagList(field(rec, "tags")); len(tags) > 0 {
 			s.applyTags(r.Context(), custID, tags, "import")
 		}
+
+		// Honor exported suppression state so a round-trip (or migration into
+		// a fresh database) cannot make unsubscribed or bounced addresses
+		// mailable again. Import only ever APPLIES suppression — a false or
+		// blank value leaves existing state untouched; clearing is a
+		// deliberate action in the UI, never a CSV side effect.
+		unsub, errU := strconv.ParseBool(strings.ToLower(field(rec, "unsubscribed")))
+		bounced, errB := strconv.ParseBool(strings.ToLower(field(rec, "bounced")))
+		if (errU == nil && unsub) || (errB == nil && bounced) {
+			if _, err := s.db.ExecContext(r.Context(),
+				`UPDATE customers SET
+				     unsubscribed_at = CASE WHEN $1 THEN COALESCE(unsubscribed_at, NOW()) ELSE unsubscribed_at END,
+				     bounced_at      = CASE WHEN $2 THEN COALESCE(bounced_at, NOW()) ELSE bounced_at END
+				 WHERE id = $3`,
+				errU == nil && unsub, errB == nil && bounced, custID); err != nil {
+				log.Printf("import suppression update for %s: %v", email, err)
+			}
+		}
 		imported++
 	}
 

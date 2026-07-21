@@ -194,7 +194,10 @@ per form is accepted and stored under `uploads/` in the chroot.
 update a customer (name/company/phone/address are picked up too; blank fields
 never overwrite existing data). Create or complete records by hand on the
 Customers page, or bulk-load them with CSV import (needs an `email` column;
-rows upsert by email). Each customer page has the editable profile, an
+rows upsert by email). The exported `unsubscribed`/`bounced` columns are
+honored on import: `true` applies the suppression, `false` or blank leaves
+existing state untouched — a re-import can never make a suppressed address
+mailable again. Each customer page has the editable profile, an
 activity timeline (notes/calls/emails/meetings + automatic mailing history),
 and their submissions.
 
