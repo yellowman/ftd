@@ -1241,15 +1241,34 @@ func (s *server) runMailingSend(id int64) {
 		}
 	}
 
+	// Finalize from database truth, not this worker's in-memory counters: after
+	// a partial retry the counters only cover the requeued subset, and another
+	// overlapping worker may still own in-flight rows.
+	var remaining, dbSent, dbFailed int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FILTER (WHERE status IN ('pending','sending')),
+		    COUNT(*) FILTER (WHERE status = 'sent'),
+		    COUNT(*) FILTER (WHERE status = 'failed')
+		 FROM mailing_recipients WHERE mailing_id=$1`, id).Scan(&remaining, &dbSent, &dbFailed); err != nil {
+		// Leave the mailing in 'sending'; startup resume can finish the job.
+		log.Printf("mailing %d: finalize count failed: %v", id, err)
+		return
+	}
+	if remaining > 0 {
+		// Another worker still owns rows; whoever finishes last finalizes.
+		log.Printf("mailing %d: this worker done (%d sent, %d failed); %d recipients still in flight elsewhere", id, sent, failed, remaining)
+		return
+	}
+
 	final := "sent"
-	if sent == 0 && failed > 0 {
+	if dbSent == 0 && dbFailed > 0 {
 		final = "failed"
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE mailings SET status=$1, sent_at=NOW() WHERE id=$2`, final, id); err != nil {
+		`UPDATE mailings SET status=$1, sent_at=NOW() WHERE id=$2 AND status='sending'`, final, id); err != nil {
 		log.Printf("mailing %d: final status update failed: %v", id, err)
 	}
-	log.Printf("mailing %d: finished (%d sent, %d failed)", id, sent, failed)
+	log.Printf("mailing %d: finished (%d sent, %d failed overall; this worker %d/%d)", id, dbSent, dbFailed, sent, failed)
 }
 
 // emailLayoutTop/Bottom form the bulletproof table skeleton wrapped around the
