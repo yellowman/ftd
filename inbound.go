@@ -68,16 +68,25 @@ func findTextPart(contentType, cte string, body io.Reader, depth int) string {
 			if err != nil {
 				break
 			}
+			partType := strings.ToLower(part.Header.Get("Content-Type"))
 			text := findTextPart(part.Header.Get("Content-Type"),
 				part.Header.Get("Content-Transfer-Encoding"), part, depth+1)
-			ctype := strings.ToLower(part.Header.Get("Content-Type"))
-			if strings.HasPrefix(ctype, "text/plain") || (ctype == "" && text != "") {
+			switch {
+			case strings.HasPrefix(partType, "multipart/"):
+				// A nested container (e.g. multipart/alternative inside
+				// multipart/mixed) already picked its best rendition in the
+				// recursive call — use it.
 				if strings.TrimSpace(text) != "" {
 					return text
 				}
-			}
-			if strings.HasPrefix(ctype, "text/html") && htmlFallback == "" {
-				htmlFallback = text
+			case strings.HasPrefix(partType, "text/plain"), partType == "":
+				if strings.TrimSpace(text) != "" {
+					return text
+				}
+			case strings.HasPrefix(partType, "text/html"):
+				if htmlFallback == "" {
+					htmlFallback = text
+				}
 			}
 		}
 		return htmlFallback
