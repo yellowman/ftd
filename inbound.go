@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"net/mail"
 	"os"
 	"strings"
+	"time"
 )
 
 // Inbound mail handling: customer replies to mailings (or any mail routed to
@@ -187,13 +189,29 @@ func (s *server) handleInbound(ctx context.Context, raw []byte) error {
 // serveLMTP accepts deliveries from the MTA on a unix socket. Minimal LMTP:
 // enough for a local Postfix/OpenSMTPD delivery agent, not the open internet —
 // the socket's filesystem permissions are the access control.
+//
+// Transient Accept errors (fd exhaustion, aborted connections) must not end
+// the loop: the MTA retries deliveries, so the listener has to survive for
+// the life of the process. Only a closed listener stops it.
 func (s *server) serveLMTP(l net.Listener) {
+	var delay time.Duration
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			log.Printf("lmtp accept error: %v", err)
-			return
+			if errors.Is(err, net.ErrClosed) {
+				log.Printf("lmtp listener closed; inbound replies disabled")
+				return
+			}
+			if delay == 0 {
+				delay = 100 * time.Millisecond
+			} else if delay *= 2; delay > 5*time.Second {
+				delay = 5 * time.Second
+			}
+			log.Printf("lmtp accept error (retrying in %v): %v", delay, err)
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go s.lmtpSession(conn)
 	}
 }
