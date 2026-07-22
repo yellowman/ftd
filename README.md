@@ -18,8 +18,8 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 ## Quick start (any platform)
 
 ```sh
-go mod tidy                     # first build only: fetch deps, write go.sum
-go build -o /usr/local/bin/ftd
+make                            # builds ftd (fetches deps on first run)
+doas make install               # binary, /etc/ftd.conf (kept if present), rc script
 createdb ftd
 psql ftd < schema.sql           # idempotent; re-run it after upgrades
 DATABASE_URL="postgres://user:pass@localhost/ftd?sslmode=disable" ftd -tcp 9000
@@ -52,9 +52,9 @@ useradd -m _ftd
 su - _postgresql -c "createdb ftd"
 psql ftd < schema.sql
 
-# 3. Build
-go mod tidy
-go build -o /usr/local/bin/ftd
+# 3. Build and install (binary, /etc/ftd.conf if absent, /etc/rc.d/ftd)
+make
+doas make install
 
 # 4. Socket directory for httpd
 install -d -m 750 -o _ftd -g www /var/www/run
@@ -73,11 +73,9 @@ server "example.com" {
 ```
 
 Configuration and startup (the daemon reads `/etc/ftd.conf` itself; see the
-Configuration section):
+Configuration section; `make install` already placed the example there):
 
 ```sh
-install -m 755 rc.d/ftd /etc/rc.d/ftd
-install -m 640 ftd.conf /etc/ftd.conf
 vi /etc/ftd.conf      # uncomment and set database_url and session_secret
 
 rcctl enable httpd ftd
@@ -99,9 +97,9 @@ sudo useradd -m -s /usr/sbin/nologin _ftd
 sudo -u postgres createdb -O ftd ftd     # after: sudo -u postgres createuser ftd
 psql -U ftd ftd < schema.sql
 
-# 3. Build
-go mod tidy
-go build -o /usr/local/bin/ftd
+# 3. Build and install (binary + /etc/ftd.conf if absent)
+make
+sudo make install
 
 # 4. Socket directory for nginx
 sudo install -d -m 750 -o _ftd -g www-data /var/www/run
@@ -140,7 +138,6 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-sudo install -m 640 ftd.conf /etc/ftd.conf
 sudo vi /etc/ftd.conf     # uncomment and set database_url and session_secret
 sudo systemctl enable --now ftd
 ```
@@ -392,4 +389,5 @@ pick a new selector, publish the new TXT record, then switch the signer.
 - `templates/`, `static/` – admin UI (embedded into the binary at build time).
 - `sample_form.html`, `sample_form_upload.html` – example forms.
 - `ftd.conf` – example configuration listing every option, commented out; install to `/etc/ftd.conf`.
+- `Makefile` – BSD-style; `make` builds, `make install` installs the binary, config example (never overwriting an existing `/etc/ftd.conf`), and — where `/etc/rc.d` exists — the rc script. `PREFIX`/`DESTDIR` respected.
 - `rc.d/ftd` – OpenBSD rc.d script.
