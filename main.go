@@ -492,6 +492,15 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 	if err != nil {
 		return nil, "", fmt.Errorf("listen unix: %w", err)
 	}
+	// Connecting to a unix socket requires write permission, and the web
+	// server runs as its own user (www/www-data) — with the default 0755 the
+	// daemon works but httpd gets ECONNREFUSED-ish failures and serves 500s.
+	// 0666 is safe here because the socket directory (/var/www/run, 750
+	// _ftd:www per the README) is what gates access.
+	if err := os.Chmod(path, 0666); err != nil {
+		l.Close()
+		return nil, "", fmt.Errorf("chmod socket: %w", err)
+	}
 	return l, fmt.Sprintf("unix %s", path), nil
 }
 
