@@ -20,9 +20,12 @@ all: ${PROG}
 # the source list (templates/ and static/ are embedded at build time too).
 # First build on a fresh clone fetches dependencies and writes go.sum.
 # FRC forces the rule to run every time, portably across BSD and GNU make.
+# -buildvcs=false: VCS stamping runs git, which fails when building in a
+# checkout owned by another user (e.g. doas make in ~user; git's
+# safe.directory check exits 128) or without git installed. We don't need it.
 ${PROG}: FRC
 	@[ -f go.sum ] || ${GO} mod tidy
-	${GO} build -trimpath -o ${PROG} .
+	${GO} build -trimpath -buildvcs=false -o ${PROG} .
 
 FRC:
 
