@@ -40,6 +40,12 @@
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
           <button type="submit">Archive completed</button>
         </form>
+        {{if .InvalidCount}}
+        <form method="post" action="{{.AdminPrefix}}/delete-invalid" class="bulk-archive delete-invalid" data-count="{{.InvalidCount}}">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="danger">Delete bad email ({{.InvalidCount}})</button>
+        </form>
+        {{end}}
         {{end}}
         <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
       </div>
@@ -49,6 +55,9 @@
     <div class="alert warning">Default admin password is still active. Change it below.</div>
     {{end}}
     {{with .PasswordFlash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+    {{with .CleanupFlash}}
     <div class="alert {{.Kind}}">{{.Message}}</div>
     {{end}}
 

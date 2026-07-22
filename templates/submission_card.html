@@ -9,6 +9,7 @@
         {{if .S.CustomerID.Valid}}
         <a class="assoc" href="{{.AdminPrefix}}/customers/view?id={{.S.CustomerID.Int64}}">&#9679; {{if .S.CustomerName.String}}{{.S.CustomerName.String}}{{else}}{{.S.CustomerEmail.String}}{{end}}</a>
         {{end}}
+        {{if .S.EmailUnresolvable}}<span class="status-pill failed" title="The email domain had no MX or A record at submission time">bad email</span>{{end}}
         <span class="status-pill {{.S.Status}}">{{.S.Status}}</span>
       </span>
     </div>

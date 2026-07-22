@@ -8,13 +8,18 @@ CREATE TABLE IF NOT EXISTS submissions (
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','in_progress','complete','archived')),
     file_path TEXT,
     comment TEXT,
-    form_data JSONB NOT NULL
+    form_data JSONB NOT NULL,
+    -- Set at intake when the supplied email's domain had no MX or A/AAAA
+    -- record (authoritative NXDOMAIN/NODATA or RFC 7505 null MX only —
+    -- transient DNS failures never set it).
+    email_unresolvable BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Backfill columns on databases created before they were introduced, so that
 -- re-running this script is sufficient to migrate an existing install.
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS forwarded_for TEXT;
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS customer_id INTEGER;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS email_unresolvable BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS submissions_status_submitted_at_idx
     ON submissions (status, submitted_at DESC);

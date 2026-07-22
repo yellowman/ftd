@@ -9,6 +9,7 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 
 - Accepts arbitrary form fields (stored as JSONB) plus request metadata; optional single file upload.
 - Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), live updates (new submissions appear without a reload), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
+- Email deliverability check at intake: DNS MX/A lookup on the submitted address's domain; unresolvable addresses are captured but flagged, the submitting site gets a warning to show the visitor, and flagged entries can be bulk-deleted from the dashboard.
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
 - Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
 - Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
@@ -190,6 +191,27 @@ submitted. A hidden `redirect` field sends the submitter to a thank-you page
 afterward; the target must be a root-relative path or a same-host URL
 (cross-host redirects are rejected). With `MAX_UPLOAD_MB` set, one file field
 per form is accepted and stored under `uploads/` in the chroot.
+
+**Email deliverability check** — when a submission carries an email address,
+ftd checks (DNS) that the domain has an MX record, or failing that an A/AAAA
+record (the implicit MX of RFC 5321; RFC 7505 null MX counts as "accepts no
+mail"). An unresolvable address never rejects the submission — the data is
+captured and flagged, and the response warns the site so it can tell the
+visitor to double-check their address:
+
+- with a `redirect` field, the thank-you URL gains `?ftd_email=unresolvable`;
+- with `Accept: application/json` (fetch/XHR forms), the 202 body is
+  `{"status":"accepted","email_unresolvable":true|false}`;
+- otherwise the plain-text 202 body carries the warning.
+
+Only an authoritative "domain does not exist" flags the entry — resolver
+timeouts or failures never penalize a visitor. Nameservers are read from
+`/etc/resolv.conf` once at startup (the daemon chroots afterward); with none
+configured the check is disabled. Flagged entries show a red **bad email**
+badge in the inbox, and a **Delete bad email (N)** button appears in the
+dashboard header: it deletes all flagged submissions at once, plus any
+customer records that existed *only* because of them (a customer with any
+other submission, list membership, or mailing history is left alone).
 
 **Customers** — submissions with a recognizable `email` field auto-create or
 update a customer (name/company/phone/address are picked up too; blank fields

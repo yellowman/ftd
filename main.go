@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -84,6 +84,7 @@ type server struct {
 	replyTo               string
 	publicBaseURL         string
 	defaultPasswordActive bool
+	emailCheck            *emailChecker
 }
 
 type ctxKey string
@@ -94,21 +95,22 @@ const (
 )
 
 type Submission struct {
-	ID            int64
-	SubmittedAt   time.Time
-	IP            sql.NullString
-	ForwardedFor  sql.NullString
-	UserAgent     sql.NullString
-	Referer       sql.NullString
-	Status        string
-	FilePath      sql.NullString
-	Comment       sql.NullString
-	FormData      json.RawMessage
-	FormPretty    string
-	Fields        []FieldEntry
-	CustomerID    sql.NullInt64
-	CustomerName  sql.NullString
-	CustomerEmail sql.NullString
+	ID                int64
+	SubmittedAt       time.Time
+	IP                sql.NullString
+	ForwardedFor      sql.NullString
+	UserAgent         sql.NullString
+	Referer           sql.NullString
+	Status            string
+	FilePath          sql.NullString
+	Comment           sql.NullString
+	FormData          json.RawMessage
+	FormPretty        string
+	Fields            []FieldEntry
+	CustomerID        sql.NullInt64
+	CustomerName      sql.NullString
+	CustomerEmail     sql.NullString
+	EmailUnresolvable bool
 }
 
 type FieldEntry struct {
@@ -278,6 +280,9 @@ func main() {
 	if err := s.refreshDefaultPasswordFlag(context.Background()); err != nil {
 		log.Fatalf("failed to check admin password: %v", err)
 	}
+
+	// Reads /etc/resolv.conf, so this must happen before the chroot below.
+	s.emailCheck = newEmailChecker()
 
 	// The web server and the MTA run as different users, so each socket has
 	// its own owner settings.
@@ -627,6 +632,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/retry"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingRetry))))
 	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
 	mux.Handle(s.adminPath("/poll"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handlePoll))))
+	mux.Handle(s.adminPath("/delete-invalid"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteInvalid))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
@@ -738,9 +744,20 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Deliverability check on the supplied email's domain (MX, else A/AAAA).
+	// An unresolvable address never rejects the submission — the data is
+	// captured and flagged, and the response carries a warning the site can
+	// show the visitor.
+	emailUnresolvable := false
+	if email, _, _, _, _ := extractContact(payload); email != "" {
+		if s.emailCheck.verdict(r.Context(), email) == emailInvalid {
+			emailUnresolvable = true
+		}
+	}
+
 	_, err = s.db.Exec(
-		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON, customerID,
+		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id, email_unresolvable) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON, customerID, emailUnresolvable,
 	)
 	if err != nil {
 		log.Printf("insert submission error: %v", err)
@@ -754,11 +771,34 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 			writeRedirectDeniedPage(w)
 			return
 		}
+		// The thank-you page can check for ftd_email=unresolvable and warn.
+		if emailUnresolvable {
+			if u, err := url.Parse(target); err == nil {
+				q := u.Query()
+				q.Set("ftd_email", "unresolvable")
+				u.RawQuery = q.Encode()
+				target = u.String()
+			}
+		}
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
 
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":             "accepted",
+			"email_unresolvable": emailUnresolvable,
+		})
+		return
+	}
+
 	w.WriteHeader(http.StatusAccepted)
+	if emailUnresolvable {
+		_, _ = w.Write([]byte("submission received (warning: the email domain does not resolve; the address may be undeliverable)"))
+		return
+	}
 	_, _ = w.Write([]byte("submission received"))
 }
 
@@ -1416,6 +1456,20 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var invalidCount int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM submissions WHERE email_unresolvable").Scan(&invalidCount); err != nil {
+		log.Printf("invalid email count error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	var cleanupFlash *passwordFlash
+	if n := r.URL.Query().Get("cleaned"); n != "" {
+		if count, err := strconv.Atoi(n); err == nil && count >= 0 {
+			cleanupFlash = &passwordFlash{Kind: "success", Message: fmt.Sprintf("Deleted %d submission(s) with unresolvable email addresses.", count)}
+		}
+	}
+
 	data := map[string]interface{}{
 		"Submissions":     submissions,
 		"Page":            page,
@@ -1428,11 +1482,96 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		"AdminPrefix":     s.adminPrefix,
 		"DefaultPassword": s.defaultPasswordActive,
 		"PasswordFlash":   flash,
+		"CleanupFlash":    cleanupFlash,
+		"InvalidCount":    invalidCount,
 		"LivePoll":        page == 1,
 		"LatestID":        latestID,
 	}
 
 	renderTemplate(w, "templates/dashboard.html", data)
+}
+
+// handleDeleteInvalid bulk-deletes every submission flagged email_unresolvable,
+// along with customer records that exist only because of those submissions
+// (no other submissions, no list memberships, no mailing history — so real
+// customers whose domain later lapsed are never swept up).
+func (s *server) handleDeleteInvalid(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("delete invalid begin error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(r.Context(), "DELETE FROM submissions WHERE email_unresolvable RETURNING customer_id")
+	if err != nil {
+		log.Printf("delete invalid submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	deleted := 0
+	customerSet := map[int64]bool{}
+	for rows.Next() {
+		var cid sql.NullInt64
+		if err := rows.Scan(&cid); err != nil {
+			rows.Close()
+			log.Printf("delete invalid scan error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		deleted++
+		if cid.Valid {
+			customerSet[cid.Int64] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		log.Printf("delete invalid rows error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(customerSet) > 0 {
+		ids := make([]int64, 0, len(customerSet))
+		for id := range customerSet {
+			ids = append(ids, id)
+		}
+		if _, err := tx.ExecContext(r.Context(),
+			`DELETE FROM customers c WHERE c.id = ANY($1)
+			   AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.customer_id = c.id)
+			   AND NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.customer_id = c.id)
+			   AND NOT EXISTS (SELECT 1 FROM mailing_recipients mr WHERE mr.customer_id = c.id)`,
+			pq.Array(ids),
+		); err != nil {
+			log.Printf("delete invalid customers error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("delete invalid commit error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, s.adminPath("/?cleaned="+strconv.Itoa(deleted)), http.StatusSeeOther)
 }
 
 // handlePoll serves the dashboard's live-update loop: submissions with id
@@ -1699,7 +1838,7 @@ func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 // excluded — the live view never shows archived items).
 func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status string, limit int) ([]Submission, error) {
 	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
-	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, c.name, c.email
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, sub.email_unresolvable, c.name, c.email
 	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id
 	    WHERE sub.id > $1`
 	args := []interface{}{after}
@@ -1721,7 +1860,7 @@ func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status s
 	submissions := []Submission{}
 	for rows.Next() {
 		var sub Submission
-		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.CustomerName, &sub.CustomerEmail); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.EmailUnresolvable, &sub.CustomerName, &sub.CustomerEmail); err != nil {
 			return nil, err
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
@@ -1736,7 +1875,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 
 	args := []interface{}{}
 	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
-	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, c.name, c.email
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, sub.email_unresolvable, c.name, c.email
 	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id`
 	countQuery := `SELECT COUNT(*) FROM submissions sub`
 
@@ -1766,7 +1905,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	submissions := []Submission{}
 	for rows.Next() {
 		var sub Submission
-		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.CustomerName, &sub.CustomerEmail); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.EmailUnresolvable, &sub.CustomerName, &sub.CustomerEmail); err != nil {
 			return nil, 0, err
 		}
 		sub.FormPretty = formatJSON(sub.FormData)

@@ -9,6 +9,18 @@
 (function () {
   "use strict";
 
+  // Bulk delete of bad-email submissions is irreversible: confirm first.
+  // (Attached here because CSP blocks inline onsubmit handlers.)
+  var delForm = document.querySelector("form.delete-invalid");
+  if (delForm) {
+    delForm.addEventListener("submit", function (e) {
+      var n = delForm.getAttribute("data-count") || "all";
+      if (!window.confirm("Delete " + n + " submission(s) with unresolvable email addresses? This cannot be undone.")) {
+        e.preventDefault();
+      }
+    });
+  }
+
   var section = document.querySelector(".submissions[data-poll-url]");
   if (!section || !window.fetch) return;
 
