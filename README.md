@@ -66,9 +66,11 @@ install -d -m 750 -o _ftd -g www /var/www/run
 server "example.com" {
     listen on * port 80
 
-    location "/form"         { fastcgi socket "/var/www/run/ftd.sock" }
-    location "/form/t/*"     { fastcgi socket "/var/www/run/ftd.sock" }
-    location "/form/admin/*" { fastcgi socket "/var/www/run/ftd.sock" }
+    # httpd is chrooted to /var/www: socket paths here are inside the chroot,
+    # so /run/ftd.sock is the file ftd creates at /var/www/run/ftd.sock.
+    location "/form"         { fastcgi socket "/run/ftd.sock" }
+    location "/form/t/*"     { fastcgi socket "/run/ftd.sock" }
+    location "/form/admin/*" { fastcgi socket "/run/ftd.sock" }
 }
 ```
 
