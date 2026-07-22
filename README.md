@@ -1,8 +1,8 @@
-# ftd
+# ftd — form To Do
 
-FastCGI form collector and mini-CRM. HTML forms post to it, submissions become
-to-do items in an admin dashboard, and submitters become customer records you
-can organize into lists and send tracked mailings to. Single Go binary,
+Turn form posts into to-dos. HTML forms post to ftd over FastCGI, submissions
+land in an admin inbox, and submitters become customer records you can
+organize into lists, tag, and send tracked mailings to. Single Go binary,
 PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 
 ## Features
@@ -16,30 +16,27 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 - Reply capture: route your Reply-To mailbox into ftd (Postfix LMTP or a pipe helper) and customer replies appear as new to-do submissions linked to their customer record.
 - Rate limiting: 8 submissions/minute per IP with a 1-hour block (both env-tunable), global 5-minute pause on bursts of 30+ distinct IPs. Blocked requests get HTTP 429 with `Retry-After`.
 
-## Quick start (any platform)
+## Quick start (any platform, 3 commands)
 
 ```sh
-make                            # builds ftd (fetches deps on first run)
-doas make install               # binary, /etc/ftd.conf (kept if present), rc script
-createdb ftd
-psql ftd < schema.sql           # idempotent; re-run it after upgrades
-DATABASE_URL="postgres://user:pass@localhost/ftd?sslmode=disable" ftd -tcp 9000
+make                                          # builds ftd (fetches deps on first run)
+createdb ftd && psql ftd < schema.sql         # schema is idempotent; re-run after upgrades
+DATABASE_URL="postgres://user:pass@localhost/ftd?sslmode=disable" ./ftd -tcp 9000
 ```
 
-Point a FastCGI-capable web server at TCP 9000 (or at the Unix socket, see
-below), then log in at `/form/admin/` as `admin` / `change-me` and change the
-password. Sample forms: `sample_form.html`, `sample_form_upload.html`.
+Point a FastCGI-capable web server at TCP 9000, log in at `/form/admin/` as
+`admin` / `change-me`, change the password. Sample forms:
+`sample_form.html`, `sample_form_upload.html`. For a real install follow a
+platform section below — it's the same three steps plus a service account,
+a unix socket, and `/etc/ftd.conf`.
 
-(Inline environment variables work for one-off runs like this; for a real
-install put the settings in `/etc/ftd.conf` — see Configuration.)
+**The one Postgres rule:** load `schema.sql` as the same role ftd connects
+as, so that role owns every table and sequence — then permissions can never
+bite you. If your admin account differs from the ftd role, prefix the load
+with `SET ROLE` (used in the recipes below):
 
-**Database permissions:** the role in `database_url` needs the tables *and*
-sequences. Easiest is to run `schema.sql` as that role so it owns everything.
-Otherwise, as the owner:
-
-```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ftd;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ftd;
+```sh
+(echo 'SET ROLE ftd;'; cat schema.sql) | psql ftd
 ```
 
 ## OpenBSD setup (httpd)
@@ -49,15 +46,20 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ftd;
 pkg_add go postgresql-server postgresql-client
 useradd -m _ftd
 
-# 2. Database
-su - _postgresql -c "createdb ftd"
-psql ftd < schema.sql
+# 2. Postgres (first time only: init and start the cluster)
+su - _postgresql -c "initdb -D /var/postgresql/data -U postgres"
+rcctl enable postgresql && rcctl start postgresql
 
-# 3. Build and install (binary, /etc/ftd.conf if absent, /etc/rc.d/ftd)
+# 3. Role + database + schema (schema owned by the ftd role)
+su - _postgresql -c "psql -U postgres -c \"CREATE ROLE ftd LOGIN PASSWORD 'changeme'\""
+su - _postgresql -c "createdb -U postgres -O ftd ftd"
+(echo 'SET ROLE ftd;'; cat schema.sql) | su - _postgresql -c "psql -U postgres ftd"
+
+# 4. Build and install (binary, /etc/ftd.conf if absent, /etc/rc.d/ftd)
 make
 doas make install
 
-# 4. Socket directory for httpd
+# 5. Socket directory for httpd
 install -d -m 750 -o _ftd -g www /var/www/run
 ```
 
@@ -75,11 +77,13 @@ server "example.com" {
 }
 ```
 
-Configuration and startup (the daemon reads `/etc/ftd.conf` itself; see the
-Configuration section; `make install` already placed the example there):
+Configure and start (`make install` already placed the example config;
+every option is listed there, commented out):
 
 ```sh
-vi /etc/ftd.conf      # uncomment and set database_url and session_secret
+vi /etc/ftd.conf
+#   database_url = postgres://ftd:changeme@localhost/ftd?sslmode=disable
+#   session_secret = <any long random string>
 
 rcctl enable httpd ftd
 rcctl start httpd ftd
@@ -96,9 +100,10 @@ into the chroot.
 sudo apt-get install -y golang postgresql nginx
 sudo useradd -m -s /usr/sbin/nologin _ftd
 
-# 2. Database
-sudo -u postgres createdb -O ftd ftd     # after: sudo -u postgres createuser ftd
-psql -U ftd ftd < schema.sql
+# 2. Role + database + schema (schema owned by the ftd role)
+sudo -u postgres psql -c "CREATE ROLE ftd LOGIN PASSWORD 'changeme'"
+sudo -u postgres createdb -O ftd ftd
+(echo 'SET ROLE ftd;'; cat schema.sql) | sudo -u postgres psql ftd
 
 # 3. Build and install (binary + /etc/ftd.conf if absent)
 make
@@ -123,13 +128,13 @@ server {
 ```
 
 (The `/form` prefix also covers `/form/admin/` and `/form/t/`; add explicit
-blocks only if you move `ADMIN_PREFIX`/`TRACK_PATH` elsewhere.)
+blocks only if you move `admin_prefix`/`track_path` elsewhere.)
 
 `/etc/systemd/system/ftd.service`:
 
 ```
 [Unit]
-Description=ftd form collector
+Description=ftd - form To Do
 After=network.target postgresql.service
 
 [Service]
@@ -141,7 +146,11 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-sudo vi /etc/ftd.conf     # uncomment and set database_url and session_secret
+sudo vi /etc/ftd.conf
+#   database_url = postgres://ftd:changeme@localhost/ftd?sslmode=disable
+#   session_secret = <any long random string>
+#   socket_group = www-data
+
 sudo systemctl enable --now ftd
 ```
 
@@ -189,7 +198,7 @@ daemon flags through rc.d as usual — e.g. an alternate config:
 **Forms** — point any form's `action` at `/form`. All fields are stored as
 submitted. A hidden `redirect` field sends the submitter to a thank-you page
 afterward; the target must be a root-relative path or a same-host URL
-(cross-host redirects are rejected). With `MAX_UPLOAD_MB` set, one file field
+(cross-host redirects are rejected). With `max_upload_mb` set, one file field
 per form is accepted and stored under `uploads/` in the chroot.
 
 ### Email deliverability check
@@ -298,7 +307,7 @@ format menu, bold/italic/underline/strike, lists, quotes, links (Ctrl+K,
 inline dialog), images, CTA buttons, divider, undo/redo, with active-state
 highlighting and an HTML-source toggle for hand editing; plain textarea if
 JavaScript is off — upload images to the media library and
-insert them (stored in Postgres, served publicly under `TRACK_PATH/img` so
+insert them (stored in Postgres, served publicly under `track_path/img` so
 mail clients can fetch them), and check layout in the live preview pane, which
 renders the saved draft in a mail-client-style frame and marks where the
 unsubscribe link and tracking pixel land. Pick a list (or all customers),
@@ -456,7 +465,7 @@ pick a new selector, publish the new TXT record, then switch the signer.
 
 ## Security notes
 
-- Set a strong `SESSION_SECRET` and change the default admin password immediately (the UI nags until you do).
+- Set a strong `session_secret` and change the default admin password immediately (the UI nags until you do).
 - Terminate TLS at the web server. Rate limiting keys on the FastCGI peer address (`REMOTE_ADDR`); a client-supplied `X-Forwarded-For` is stored for reference but never trusted.
 - Started as root, ftd chroots to `_ftd`'s home and drops privileges after opening its sockets; on OpenBSD it then pledges down to the minimal promises needed to serve.
 - Admin POSTs require CSRF tokens; cookies are `Secure`/`HttpOnly`/`SameSite=Strict`; responses carry restrictive security headers.

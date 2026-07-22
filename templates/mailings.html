@@ -28,7 +28,7 @@
     </header>
 
     {{if not .SMTPConfigured}}
-    <div class="alert warning">SMTP is not configured — set <code>SMTP_HOST</code> and <code>MAIL_FROM</code> to enable sending. Drafts can still be composed.</div>
+    <div class="alert warning">SMTP is not configured — set <code>smtp_host</code> and <code>mail_from</code> to enable sending. Drafts can still be composed.</div>
     {{end}}
     {{with .Flash}}
     <div class="alert {{.Kind}}">{{.Message}}</div>

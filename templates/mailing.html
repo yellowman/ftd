@@ -35,10 +35,10 @@
 
     {{if eq .Mailing.Status "draft"}}
     {{if not .SMTPConfigured}}
-    <div class="alert warning">SMTP is not configured — set <code>SMTP_HOST</code> and <code>MAIL_FROM</code> before sending.</div>
+    <div class="alert warning">SMTP is not configured — set <code>smtp_host</code> and <code>mail_from</code> before sending.</div>
     {{end}}
     {{if not .TrackingEnabled}}
-    <div class="alert warning">Set <code>PUBLIC_BASE_URL</code> to enable open tracking and unsubscribe links in outgoing mail.</div>
+    <div class="alert warning">Set <code>public_base_url</code> to enable open tracking and unsubscribe links in outgoing mail.</div>
     {{end}}
 
     <section class="compose-card">
