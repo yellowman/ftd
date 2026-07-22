@@ -616,6 +616,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/customers/update"), customerUpdate)
 	mux.Handle(s.adminPath("/customers/note"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerNote))))
 	mux.Handle(s.adminPath("/customers/clear-bounce"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerClearBounce))))
+	mux.Handle(s.adminPath("/customers/email"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerEmail))))
 	mux.Handle(s.adminPath("/customers/export"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerExport))))
 	mux.Handle(s.adminPath("/customers/import"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerImport))))
 	mux.Handle(s.adminPath("/customers/tag"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerTag))))
@@ -2247,16 +2248,19 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]interface{}{
-		"Customer":    customer,
-		"Submissions": subs,
-		"Timeline":    timeline,
-		"TagChips":    chips,
-		"AllTags":     allTags,
-		"Clicks":      clicks,
-		"MemberOf":    memberOf,
-		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
-		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
-		"AdminPrefix": s.adminPrefix,
+		"Customer":       customer,
+		"Submissions":    subs,
+		"Timeline":       timeline,
+		"TagChips":       chips,
+		"AllTags":        allTags,
+		"Clicks":         clicks,
+		"MemberOf":       memberOf,
+		"Flash":          mapCustomerFlash(r.URL.Query().Get("saved")),
+		"CSRFToken":      r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix":    s.adminPrefix,
+		"SMTPConfigured": s.smtpConfigured(),
+		"MailFrom":       s.mailFrom,
+		"ReplyTo":        s.replyTo,
 	}
 	renderTemplate(w, "templates/customer.html", data)
 }
@@ -2327,6 +2331,16 @@ func mapCustomerFlash(code string) *passwordFlash {
 		return &passwordFlash{Message: "Customer saved.", Kind: "success"}
 	case "err":
 		return &passwordFlash{Message: "Could not save — is that email already used by another customer?", Kind: "error"}
+	case "mailsent":
+		return &passwordFlash{Message: "Email sent and logged on the timeline.", Kind: "success"}
+	case "mailfail":
+		return &passwordFlash{Message: "Sending failed — check the SMTP relay and the daemon log.", Kind: "error"}
+	case "mailempty":
+		return &passwordFlash{Message: "Subject and body are both required.", Kind: "error"}
+	case "mailbad":
+		return &passwordFlash{Message: "This customer has no valid email address.", Kind: "error"}
+	case "nosmtp":
+		return &passwordFlash{Message: "SMTP is not configured — set smtp_host and mail_from in ftd.conf.", Kind: "error"}
 	default:
 		return nil
 	}

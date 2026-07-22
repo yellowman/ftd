@@ -228,8 +228,8 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
 }
 
-.password-card label.full,
-.compose-card label.full { grid-column: 1 / -1; }
+.password-card .full,
+.compose-card .full { grid-column: 1 / -1; }
 
 /* The account form is rarely needed: collapsed at the bottom of the page. */
 details.tools { margin-top: 2rem; }
@@ -662,29 +662,73 @@ pre.json {
 .editor-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.2rem;
+  align-items: center;
+  gap: 0.15rem;
   padding: 0.3rem;
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
   border-bottom: none;
   border-radius: var(--radius) var(--radius) 0 0;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .editor-toolbar button {
   background: none;
   border: 1px solid transparent;
   color: var(--text);
-  padding: 0.2rem 0.5rem;
+  padding: 0 0.5rem;
+  min-width: 28px;
   font-size: 0.78rem;
 }
 
 .editor-toolbar button:hover { border-color: var(--line-strong); background: var(--bg); }
 
+.editor-toolbar button.active {
+  background: var(--bg);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.editor-toolbar select {
+  width: auto;
+  font-size: 0.78rem;
+  padding: 0 0.3rem;
+  border-color: var(--line);
+  background: none;
+}
+
+.tb-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--line-strong);
+}
+
+/* Inline URL dialog — replaces window.prompt for links/images/buttons. */
+.editor-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding: 0.5rem;
+  background: var(--panel-2);
+  border: 1px solid var(--accent-dim);
+  border-top: none;
+}
+
+.editor-panel[hidden] { display: none; }
+
+.editor-panel label { flex: 1 1 220px; font-size: 0.72rem; color: var(--faint); }
+.editor-panel button.panel-cancel { border-color: var(--line); color: var(--muted); }
+
 /* The editing surface mimics an email: light background, dark text. */
 .rich-editor {
   background: #ffffff;
   color: #1a1a1a;
-  min-height: 280px;
+  min-height: 420px;
+  resize: vertical;
   padding: 1rem 1.2rem;
   border: 1px solid var(--line-strong);
   border-radius: 0 0 var(--radius) var(--radius);
@@ -692,6 +736,12 @@ pre.json {
   font-size: 0.95rem;
   line-height: 1.5;
   overflow-y: auto;
+}
+
+.rich-editor:empty::before {
+  content: attr(data-placeholder);
+  color: #9a9a9a;
+  pointer-events: none;
 }
 
 .rich-editor:focus { outline: 1px solid var(--accent-dim); }
@@ -810,10 +860,17 @@ button.danger {
 
 /* Micro buttons keep their intrinsic size. */
 .chip-x,
-.editor-toolbar button,
 .raw-btn,
 .media-actions .media-insert {
   height: auto;
+}
+
+/* Editor toolbar controls share one compact height, flush in the strip. */
+.editor-toolbar button,
+.editor-toolbar select,
+.editor-panel button,
+.editor-panel input {
+  height: 26px;
 }
 
 /* In labeled form grids, a bare button cell hugs the row bottom so it lines

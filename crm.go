@@ -1437,6 +1437,114 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	return buf.Bytes()
 }
 
+// buildDirectMessage assembles a personal 1:1 email (a reply composed from a
+// customer page). Unlike mailings it carries no tracking, no unsubscribe
+// footer, and no bulletproof table wrapper — it should read like a person
+// wrote it. Text alternative is generated from the HTML for text-only clients.
+func (s *server) buildDirectMessage(to, subject, htmlBody string) []byte {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "From: %s\r\n", s.mailFrom)
+	fmt.Fprintf(&buf, "To: %s\r\n", to)
+	if s.replyTo != "" && !sameAddress(s.replyTo, s.mailFrom) {
+		fmt.Fprintf(&buf, "Reply-To: %s\r\n", s.replyTo)
+	}
+	clean := strings.NewReplacer("\r", " ", "\n", " ").Replace(subject)
+	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", clean))
+	fmt.Fprintf(&buf, "Date: %s\r\n", time.Now().UTC().Format(time.RFC1123Z))
+	buf.WriteString("MIME-Version: 1.0\r\n")
+
+	mw := multipart.NewWriter(&buf)
+	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", mw.Boundary())
+	writePart := func(ctype, content string) {
+		part, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {ctype + "; charset=utf-8"},
+			"Content-Transfer-Encoding": {"quoted-printable"},
+		})
+		if err != nil {
+			return
+		}
+		qp := quotedprintable.NewWriter(part)
+		_, _ = qp.Write([]byte(content))
+		_ = qp.Close()
+	}
+	writePart("text/plain", htmlToText(htmlBody))
+	writePart("text/html", htmlBody)
+	_ = mw.Close()
+	return buf.Bytes()
+}
+
+// handleCustomerEmail sends a one-off composed email to a single customer
+// from their CRM page and records it on the activity timeline. Suppression
+// flags (unsubscribed/bounced) do not block it: this is personal
+// correspondence initiated by an operator, not a marketing send.
+func (s *server) handleCustomerEmail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	view := s.adminPath("/customers/view?id=" + strconv.FormatInt(id, 10))
+
+	subject := strings.TrimSpace(r.FormValue("subject"))
+	body := strings.TrimSpace(r.FormValue("body_html"))
+	if subject == "" || len(subject) > 300 || body == "" || len(body) > 256*1024 {
+		http.Redirect(w, r, view+"&saved=mailempty", http.StatusSeeOther)
+		return
+	}
+	if !s.smtpConfigured() {
+		http.Redirect(w, r, view+"&saved=nosmtp", http.StatusSeeOther)
+		return
+	}
+
+	var rawEmail sql.NullString
+	if err := s.db.QueryRowContext(r.Context(), "SELECT email FROM customers WHERE id=$1", id).Scan(&rawEmail); err == sql.ErrNoRows {
+		http.Error(w, "customer not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		log.Printf("customer email lookup error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	email, ok := sanitizeEmail(rawEmail.String)
+	if !ok {
+		http.Redirect(w, r, view+"&saved=mailbad", http.StatusSeeOther)
+		return
+	}
+
+	if err := s.sendSMTP(email, s.buildDirectMessage(email, subject, body)); err != nil {
+		log.Printf("direct email to customer %d failed: %v", id, err)
+		http.Redirect(w, r, view+"&saved=mailfail", http.StatusSeeOther)
+		return
+	}
+
+	// Timeline record: subject plus a text excerpt so the thread is readable
+	// without leaving the page.
+	excerpt := htmlToText(body)
+	if len(excerpt) > 1500 {
+		excerpt = excerpt[:1500] + "…"
+	}
+	user, _ := r.Context().Value(ctxKeyUser).(string)
+	if _, err := s.db.ExecContext(r.Context(),
+		`INSERT INTO activities (customer_id, kind, body, created_by) VALUES ($1, 'email', $2, $3)`,
+		id, "Sent: "+subject+"\n"+excerpt, user); err != nil {
+		log.Printf("email activity insert error: %v", err)
+	}
+
+	http.Redirect(w, r, view+"&saved=mailsent", http.StatusSeeOther)
+}
+
 // sanitizeEmail validates and canonicalizes an email address from any
 // untrusted source (forms, CSV, admin input). It must be a bare addr-spec
 // that net/mail parses back to itself — which excludes CR/LF and other

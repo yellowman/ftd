@@ -266,6 +266,17 @@ mailable again. Each customer page has the editable profile, an
 activity timeline (notes/calls/emails/meetings + automatic mailing history),
 and their submissions.
 
+**Direct replies** — every customer page has a Send email composer (the same
+WYSIWYG editor as mailings). It sends one personal message through the
+configured SMTP relay: no tracking links, no open pixel, no unsubscribe
+footer, no bulletproof table wrapper — just `multipart/alternative` with an
+auto-generated plain-text version. The send is logged on the activity
+timeline (subject + text excerpt, attributed to the logged-in admin), and
+the `reply_to` address routes the customer's answer back into the inbox.
+Suppression flags don't block it: unsubscribed means "no marketing", not
+"no correspondence". Submission cards in the inbox link straight to it via
+their ✉ reply chip.
+
 **Tags** — the interest system. Tags live in a normalized vocabulary
 (lowercase; manage it on the Tags page) and attach to customers with a
 recorded source, shown as colored chips: **manual** (set by hand on the
@@ -282,9 +293,11 @@ clicked, when, and how often.
 page; the dashboard password form changes the logged-in user's password.
 
 **Lists & mailings** — group customers into lists by email, or bulk-add by tag
-/ recent submitters. Compose in the built-in WYSIWYG editor (bold/lists/
-headings/links/CTA buttons, with an HTML-source toggle for hand editing —
-plain textarea if JavaScript is off), upload images to the media library and
+/ recent submitters. Compose in the built-in WYSIWYG editor — paragraph
+format menu, bold/italic/underline/strike, lists, quotes, links (Ctrl+K,
+inline dialog), images, CTA buttons, divider, undo/redo, with active-state
+highlighting and an HTML-source toggle for hand editing; plain textarea if
+JavaScript is off — upload images to the media library and
 insert them (stored in Postgres, served publicly under `TRACK_PATH/img` so
 mail clients can fetch them), and check layout in the live preview pane, which
 renders the saved draft in a mail-client-style frame and marks where the
