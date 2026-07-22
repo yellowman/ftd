@@ -192,26 +192,68 @@ afterward; the target must be a root-relative path or a same-host URL
 (cross-host redirects are rejected). With `MAX_UPLOAD_MB` set, one file field
 per form is accepted and stored under `uploads/` in the chroot.
 
-**Email deliverability check** — when a submission carries an email address,
-ftd checks (DNS) that the domain has an MX record, or failing that an A/AAAA
-record (the implicit MX of RFC 5321; RFC 7505 null MX counts as "accepts no
-mail"). An unresolvable address never rejects the submission — the data is
-captured and flagged, and the response warns the site so it can tell the
-visitor to double-check their address:
+### Email deliverability check
 
-- with a `redirect` field, the thank-you URL gains `?ftd_email=unresolvable`;
-- with `Accept: application/json` (fetch/XHR forms), the 202 body is
-  `{"status":"accepted","email_unresolvable":true|false}`;
-- otherwise the plain-text 202 body carries the warning.
+When a submission carries an email address, ftd checks (DNS) that the domain
+can actually receive mail: an MX record, or failing that an A/AAAA record
+(the implicit MX of RFC 5321). A lone `MX 0 .` (RFC 7505 null MX) counts as
+"accepts no mail". An unresolvable address **never rejects the submission** —
+the data is captured and flagged, and the response tells your site so it can
+warn the visitor to double-check their address.
 
-Only an authoritative "domain does not exist" flags the entry — resolver
+Only an authoritative "domain does not exist" flags an entry; resolver
 timeouts or failures never penalize a visitor. Nameservers are read from
 `/etc/resolv.conf` once at startup (the daemon chroots afterward); with none
-configured the check is disabled. Flagged entries show a red **bad email**
-badge in the inbox, and a **Delete bad email (N)** button appears in the
-dashboard header: it deletes all flagged submissions at once, plus any
-customer records that existed *only* because of them (a customer with any
-other submission, list membership, or mailing history is left alone).
+configured the check is disabled and nothing is ever flagged.
+
+**How the warning reaches your site** — the response shape depends on how the
+form was submitted, and the contract is stable:
+
+1. *Classic form post with a `redirect` field.* ftd answers
+   `303 See Other` as usual, but the redirect URL gains one query parameter:
+   `ftd_email=unresolvable`. Existing parameters are preserved. Toast it on
+   the thank-you page:
+
+   ```html
+   <script>
+   if (new URLSearchParams(location.search).get("ftd_email") === "unresolvable") {
+     showToast("Heads up — your email address doesn't look deliverable. " +
+               "Double-check it if you want a reply.");
+   }
+   </script>
+   ```
+
+2. *fetch/XHR submission.* Send `Accept: application/json` and the
+   `202 Accepted` body is machine-readable:
+
+   ```js
+   const resp = await fetch("/form", {
+     method: "POST",
+     body: new FormData(form),
+     headers: { "Accept": "application/json" },
+   });
+   const data = await resp.json();
+   // -> { "status": "accepted", "email_unresolvable": true | false }
+   if (data.email_unresolvable) {
+     showToast("Your email address doesn't look deliverable — please check it.");
+   }
+   ```
+
+3. *Plain form post, no redirect, no JSON.* The `202 Accepted` text body is
+   either `submission received` or
+   `submission received (warning: the email domain does not resolve; the
+   address may be undeliverable)`.
+
+The warning is advisory: the submission is already stored by the time the
+response goes out, so a visitor with a typo'd address still lands in the
+inbox (flagged) rather than being bounced.
+
+**Cleaning up flagged entries** — flagged submissions show a red
+**bad email** badge in the inbox, and a **Delete bad email (N)** button
+appears in the dashboard header whenever any exist. One click (with a
+confirmation) deletes all flagged submissions in a single transaction, plus
+any customer records that existed *only* because of them — a customer with
+any other submission, list membership, or mailing history is left alone.
 
 **Customers** — submissions with a recognizable `email` field auto-create or
 update a customer (name/company/phone/address are picked up too; blank fields

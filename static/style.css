@@ -15,8 +15,8 @@
   --text: #d4d7dc;
   --muted: #85898f;
   --faint: #5c6066;
-  --accent: #6ea8d8;
-  --accent-dim: #43566a;
+  --accent: #d19a3d;
+  --accent-dim: #6b5223;
   --good: #79b791;
   --warn: #c9a35e;
   --bad: #c97a7a;
@@ -332,7 +332,7 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
   background: var(--panel);
 }
 
-.card.new         { border-left-color: var(--accent); }
+.card.new         { border-left-color: var(--text); }
 .card.in_progress { border-left-color: var(--warn); }
 .card.complete    { border-left-color: var(--good); }
 .card.archived    { border-left-color: var(--faint); opacity: 0.75; }
@@ -369,7 +369,7 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
   color: var(--muted);
 }
 
-.status-pill.new         { color: var(--accent); border-color: var(--accent-dim); }
+.status-pill.new         { color: var(--text); border-color: var(--muted); }
 .status-pill.in_progress { color: var(--warn); border-color: rgba(201, 163, 94, 0.4); }
 .status-pill.complete    { color: var(--good); border-color: rgba(121, 183, 145, 0.4); }
 .status-pill.archived    { color: var(--faint); }
@@ -807,7 +807,7 @@ pre.json {
 .card.live-new { animation: live-arrive 2s ease-out; }
 
 @keyframes live-arrive {
-  0%   { background: #17202a; }
+  0%   { background: #201a10; }
   100% { background: var(--panel); }
 }
 
