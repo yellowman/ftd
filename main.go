@@ -44,16 +44,20 @@ const (
 	csrfCookieName      = "csrf_token"
 	loginCSRFCookieName = "login_csrf"
 	defaultItemsPerPage = 20
-	ipLimitPerMinute    = 4
-	ipBlockDuration     = 24 * time.Hour
-	burstWindow         = time.Minute
-	globalBlockDuration = 5 * time.Minute
-	globalDistinctIPs   = 30
-	maxSubmissionBytes  = 64 * 1024
-	maxFormFields       = 200
-	sessionLifetime     = 24 * time.Hour
-	sessionRefreshAfter = 6 * time.Hour
-	redirectFieldName   = "redirect"
+	// Rate-limit defaults; override with RATE_LIMIT_PER_MIN / RATE_BLOCK_MINUTES.
+	// Generous enough that a legitimate visitor filling several forms on one
+	// site in quick succession is not treated as an attacker, and blocks are a
+	// cooldown rather than a day-long ban.
+	defaultIPLimitPerMinute = 8
+	defaultIPBlockMinutes   = 60
+	burstWindow             = time.Minute
+	globalBlockDuration     = 5 * time.Minute
+	globalDistinctIPs       = 30
+	maxSubmissionBytes      = 64 * 1024
+	maxFormFields           = 200
+	sessionLifetime         = 24 * time.Hour
+	sessionRefreshAfter     = 6 * time.Hour
+	redirectFieldName       = "redirect"
 )
 
 var allowedStatuses = map[string]struct{}{
@@ -70,6 +74,15 @@ type server struct {
 	uploadLimit           int64
 	submitPath            string
 	adminPrefix           string
+	trackPath             string
+	ipLimitPerMinute      int
+	ipBlockDuration       time.Duration
+	smtpAddr              string
+	smtpUser              string
+	smtpPass              string
+	mailFrom              string
+	replyTo               string
+	publicBaseURL         string
 	defaultPasswordActive bool
 }
 
@@ -81,23 +94,43 @@ const (
 )
 
 type Submission struct {
-	ID           int64
-	SubmittedAt  time.Time
-	IP           sql.NullString
-	ForwardedFor sql.NullString
-	UserAgent    sql.NullString
-	Referer      sql.NullString
-	Status       string
-	FilePath     sql.NullString
-	Comment      sql.NullString
-	FormData     json.RawMessage
-	FormPretty   string
-	Fields       []FieldEntry
+	ID            int64
+	SubmittedAt   time.Time
+	IP            sql.NullString
+	ForwardedFor  sql.NullString
+	UserAgent     sql.NullString
+	Referer       sql.NullString
+	Status        string
+	FilePath      sql.NullString
+	Comment       sql.NullString
+	FormData      json.RawMessage
+	FormPretty    string
+	Fields        []FieldEntry
+	CustomerID    sql.NullInt64
+	CustomerName  sql.NullString
+	CustomerEmail sql.NullString
 }
 
 type FieldEntry struct {
 	Key   string
 	Value string
+}
+
+type Customer struct {
+	ID              int64
+	Email           sql.NullString
+	Name            sql.NullString
+	Company         sql.NullString
+	Phone           sql.NullString
+	Address         sql.NullString
+	Tags            sql.NullString
+	Notes           sql.NullString
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	UnsubscribedAt  sql.NullTime
+	BouncedAt       sql.NullTime
+	SubmissionCount int
+	TagsList        []string
 }
 
 type passwordFlash struct {
@@ -126,13 +159,24 @@ func (e *limitErr) Error() string {
 
 func main() {
 	tcpPort := flag.Int("tcp", 0, "optional TCP port for FastCGI instead of a Unix socket")
+	deliver := flag.Bool("deliver", false, "read one email from stdin, file it as a submission, and exit (Postfix pipe/aliases helper)")
+	var configFileV string
+	flag.StringVar(&configFileV, "config", "/etc/ftd.conf", "configuration file (postfix-style lowercase key = value)")
+	flag.StringVar(&configFileV, "c", "/etc/ftd.conf", "shorthand for -config")
 	flag.Parse()
+	configFile := &configFileV
+
+	if *deliver {
+		os.Exit(runDeliver(*configFile))
+	}
+
+	loadConfigFile(*configFile)
 
 	useTCP := *tcpPort != 0
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		log.Fatal("DATABASE_URL must be set")
+		log.Fatalf("database_url must be set (in %s or the DATABASE_URL environment variable)", *configFile)
 	}
 
 	fastcgiSock := os.Getenv("FASTCGI_SOCKET")
@@ -142,6 +186,19 @@ func main() {
 
 	submitPath := normalizePath(os.Getenv("FORM_PATH"), "/form")
 	adminPrefix := normalizePath(os.Getenv("ADMIN_PREFIX"), "/form/admin")
+	trackPath := normalizePath(os.Getenv("TRACK_PATH"), "/form/t")
+
+	// Mailing configuration (all optional; mailings cannot be sent until
+	// SMTP_HOST and MAIL_FROM are set).
+	smtpAddr := ""
+	if host := os.Getenv("SMTP_HOST"); host != "" {
+		port := os.Getenv("SMTP_PORT")
+		if port == "" {
+			port = "25"
+		}
+		smtpAddr = net.JoinHostPort(host, port)
+	}
+	publicBaseURL := strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/")
 
 	uploadLimitMB := int64(0)
 	if limitStr := os.Getenv("MAX_UPLOAD_MB"); limitStr != "" {
@@ -152,7 +209,26 @@ func main() {
 		uploadLimitMB = mb
 	}
 
-	allowUnix := !useTCP || strings.Contains(dbURL, "host=/")
+	ipLimitPerMinute := defaultIPLimitPerMinute
+	if v := os.Getenv("RATE_LIMIT_PER_MIN"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			log.Fatalf("invalid RATE_LIMIT_PER_MIN: %q", v)
+		}
+		ipLimitPerMinute = n
+	}
+	ipBlockMinutes := defaultIPBlockMinutes
+	if v := os.Getenv("RATE_BLOCK_MINUTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			log.Fatalf("invalid RATE_BLOCK_MINUTES: %q", v)
+		}
+		ipBlockMinutes = n
+	}
+
+	lmtpSock := os.Getenv("REPLY_LMTP_SOCKET")
+
+	allowUnix := !useTCP || strings.Contains(dbURL, "host=/") || lmtpSock != ""
 
 	sessionKey, err := deriveSessionKey()
 	if err != nil {
@@ -161,21 +237,11 @@ func main() {
 
 	secureCookie := os.Getenv("SESSION_COOKIE_INSECURE") == ""
 
-	db, err := sql.Open("postgres", dbURL)
+	db, err := openDB(dbURL)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		log.Fatalf("database: %v", err)
 	}
 	defer db.Close()
-
-	// Keep a single persistent connection so we retain access to the PostgreSQL
-	// socket after chrooting.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-
-	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
-	}
 
 	if err := ensureSchemaPresent(db); err != nil {
 		log.Fatalf("schema verification failed: %v", err)
@@ -192,12 +258,21 @@ func main() {
 	uploadLimitBytes := uploadLimitMB * 1024 * 1024
 
 	s := &server{
-		db:           db,
-		sessionKey:   sessionKey,
-		secureCookie: secureCookie,
-		uploadLimit:  uploadLimitBytes,
-		submitPath:   submitPath,
-		adminPrefix:  adminPrefix,
+		db:               db,
+		sessionKey:       sessionKey,
+		secureCookie:     secureCookie,
+		uploadLimit:      uploadLimitBytes,
+		submitPath:       submitPath,
+		adminPrefix:      adminPrefix,
+		trackPath:        trackPath,
+		ipLimitPerMinute: ipLimitPerMinute,
+		ipBlockDuration:  time.Duration(ipBlockMinutes) * time.Minute,
+		smtpAddr:         smtpAddr,
+		smtpUser:         os.Getenv("SMTP_USER"),
+		smtpPass:         os.Getenv("SMTP_PASS"),
+		mailFrom:         os.Getenv("MAIL_FROM"),
+		replyTo:          os.Getenv("REPLY_TO"),
+		publicBaseURL:    publicBaseURL,
 	}
 
 	if err := s.refreshDefaultPasswordFlag(context.Background()); err != nil {
@@ -207,6 +282,21 @@ func main() {
 	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort)
 	if err != nil {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
+	}
+
+	// Optional LMTP listener for inbound replies (created before chroot, like
+	// the FastCGI socket; the fd stays valid afterwards). Access control is the
+	// socket's filesystem permissions — grant the MTA's group connect access.
+	var lmtpListener net.Listener
+	if lmtpSock != "" {
+		_ = os.Remove(lmtpSock)
+		lmtpListener, err = net.Listen("unix", lmtpSock)
+		if err != nil {
+			log.Fatalf("failed to prepare LMTP listener: %v", err)
+		}
+		if err := os.Chmod(lmtpSock, 0660); err != nil {
+			log.Printf("lmtp socket chmod: %v", err)
+		}
 	}
 
 	// Chroot and drop privileges while still unpledged: chroot(2) and the setuid
@@ -223,10 +313,69 @@ func main() {
 		log.Fatalf("runtime pledge failed: %v", err)
 	}
 
+	// Pick up any mailings a previous process left mid-delivery.
+	if err := s.resumeStalledMailings(context.Background()); err != nil {
+		log.Printf("resume stalled mailings: %v", err)
+	}
+
+	if lmtpListener != nil {
+		log.Printf("Accepting inbound replies via LMTP on %s", lmtpSock)
+		go s.serveLMTP(lmtpListener)
+	}
+
 	log.Printf("Starting FastCGI listener for submissions and admin on %s", desc)
 	if err := s.serveFastCGI(listener); err != nil {
 		log.Fatalf("FastCGI server failed: %v", err)
 	}
+}
+
+// loadConfigFile reads a postfix-style configuration file: lowercase
+// `key = value` lines, blank lines and #-comments ignored, optional quotes
+// around values. Each key maps to the corresponding uppercase environment
+// variable (database_url -> DATABASE_URL); environment variables that are
+// already set take precedence, so the file is the base configuration and the
+// environment can override it. A missing file is not an error.
+func loadConfigFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for lineno, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			log.Printf("%s:%d: ignoring malformed line", path, lineno+1)
+			continue
+		}
+		key = strings.ToUpper(strings.TrimSpace(key))
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		if key == "" {
+			continue
+		}
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+}
+
+// openDB opens the PostgreSQL pool pinned to one persistent connection so the
+// daemon retains access to the Postgres socket after chrooting.
+func openDB(dbURL string) (*sql.DB, error) {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return db, nil
 }
 
 func dropPrivilegesIfRoot() error {
@@ -275,11 +424,11 @@ func dropPrivilegesIfRoot() error {
 
 func ensureAdminPresent(db *sql.DB) error {
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&count); err != nil {
-		return fmt.Errorf("checking admin user: %w", err)
+	if err := db.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count); err != nil {
+		return fmt.Errorf("checking admin users: %w", err)
 	}
 	if count == 0 {
-		return fmt.Errorf("admin user '%s' missing; apply schema.sql to create the default account", defaultAdminUser)
+		return fmt.Errorf("no admin users exist; apply schema.sql to create the default account")
 	}
 	return nil
 }
@@ -312,7 +461,10 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	var hash string
 	err := s.db.QueryRowContext(ctx, "SELECT password_hash FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&hash)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("admin user '%s' missing; apply schema.sql to create it", defaultAdminUser)
+		// The bootstrap 'admin' account has been removed (multi-user setups may
+		// do this deliberately); there is no default password to warn about.
+		s.defaultPasswordActive = false
+		return nil
 	} else if err != nil {
 		return fmt.Errorf("checking admin password: %w", err)
 	}
@@ -344,7 +496,7 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks", "media"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -378,6 +530,16 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	archiveCompleted := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchiveCompleted)))
 	changePassword := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleChangePassword)))
 	archived := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleArchived)))
+	customers := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomers)))
+	customerView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerView)))
+	customerUpdate := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerUpdate)))
+	users := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleUsers)))
+	lists := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleLists)))
+	listView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleListView)))
+	mailings := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailings)))
+	mailingView := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingView)))
+	mailingUpdate := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingUpdate)))
+	mailingSend := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingSend)))
 	dashboard := s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDashboard)))
 
 	mux.Handle(s.adminPath("/login"), login)
@@ -386,7 +548,35 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/archive-completed"), archiveCompleted)
 	mux.Handle(s.adminPath("/password"), changePassword)
 	mux.Handle(s.adminPath("/archived"), archived)
+	mux.Handle(s.adminPath("/customers"), customers)
+	mux.Handle(s.adminPath("/customers/view"), customerView)
+	mux.Handle(s.adminPath("/customers/update"), customerUpdate)
+	mux.Handle(s.adminPath("/customers/note"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerNote))))
+	mux.Handle(s.adminPath("/customers/clear-bounce"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerClearBounce))))
+	mux.Handle(s.adminPath("/customers/export"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerExport))))
+	mux.Handle(s.adminPath("/customers/import"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerImport))))
+	mux.Handle(s.adminPath("/customers/tag"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerTag))))
+	mux.Handle(s.adminPath("/tags"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleTags))))
+	mux.Handle(s.adminPath("/users"), users)
+	mux.Handle(s.adminPath("/lists"), lists)
+	mux.Handle(s.adminPath("/lists/view"), listView)
+	mux.Handle(s.adminPath("/mailings"), mailings)
+	mux.Handle(s.adminPath("/mailings/view"), mailingView)
+	mux.Handle(s.adminPath("/mailings/update"), mailingUpdate)
+	mux.Handle(s.adminPath("/mailings/send"), mailingSend)
+	mux.Handle(s.adminPath("/mailings/test"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingTest))))
+	mux.Handle(s.adminPath("/mailings/preview"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingPreview))))
+	mux.Handle(s.adminPath("/mailings/retry"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingRetry))))
+	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
 	mux.Handle(s.adminPath("/"), dashboard)
+
+	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
+	// click-tracking redirect, and unsubscribe. Tokens are per-recipient
+	// random values; click targets resolve server-side by link id.
+	mux.HandleFunc(s.trackPath+"/open", s.handleTrackOpen)
+	mux.HandleFunc(s.trackPath+"/c", s.handleTrackClick)
+	mux.HandleFunc(s.trackPath+"/unsub", s.handleTrackUnsub)
+	mux.HandleFunc(s.trackPath+"/img", s.handleMediaServe)
 
 	return fcgi.Serve(l, mux)
 }
@@ -479,9 +669,19 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	ua := r.UserAgent()
 	ref := r.Referer()
 
+	// Associate the submission with a customer record (created or updated from
+	// the form's contact fields) so intake feeds the CRM. Forms may self-classify
+	// via a (usually hidden) "tags" field; those tags are applied to the customer.
+	customerID := s.linkCustomer(r.Context(), payload)
+	if customerID.Valid {
+		if tags := extractFormTags(payload); len(tags) > 0 {
+			s.applyTags(r.Context(), customerID.Int64, tags, "form")
+		}
+	}
+
 	_, err = s.db.Exec(
-		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data) VALUES ($1, $2, $3, $4, $5, $6)`,
-		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON,
+		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON, customerID,
 	)
 	if err != nil {
 		log.Printf("insert submission error: %v", err)
@@ -806,15 +1006,15 @@ func (s *server) enforceRateLimits(ctx context.Context, ip string) (*limitErr, e
 		return nil, err
 	}
 
-	if recentCount >= ipLimitPerMinute {
-		blockUntil := now.Add(ipBlockDuration)
+	if recentCount >= s.ipLimitPerMinute {
+		blockUntil := now.Add(s.ipBlockDuration)
 		if err := s.setBlock(ctx, "ip", ip, blockUntil); err != nil {
 			return nil, err
 		}
-		log.Printf("blocking ip %s for %s after %d submissions in %s", ip, ipBlockDuration, recentCount, burstWindow)
+		log.Printf("blocking ip %s for %s after %d submissions in %s", ip, s.ipBlockDuration, recentCount, burstWindow)
 		return &limitErr{
 			message:    "rate limit exceeded",
-			retryAfter: ipBlockDuration,
+			retryAfter: s.ipBlockDuration,
 			status:     http.StatusTooManyRequests,
 		}, nil
 	}
@@ -1230,12 +1430,7 @@ func (s *server) handleArchiveCompleted(w http.ResponseWriter, r *http.Request) 
 		log.Printf("archived %d completed submissions", n)
 	}
 
-	target := r.Referer()
-	if !strings.HasPrefix(target, s.adminPrefix) {
-		target = s.adminPath("/")
-	}
-
-	http.Redirect(w, r, target, http.StatusSeeOther)
+	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
 }
 
 func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -1277,8 +1472,15 @@ func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The password change applies to whoever is logged in, not a fixed account.
+	username, _ := r.Context().Value(ctxKeyUser).(string)
+	if username == "" {
+		redirect("error")
+		return
+	}
+
 	var existingHash string
-	if err := s.db.QueryRowContext(r.Context(), "SELECT password_hash FROM admin_users WHERE username=$1", defaultAdminUser).Scan(&existingHash); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), "SELECT password_hash FROM admin_users WHERE username=$1", username).Scan(&existingHash); err != nil {
 		log.Printf("password fetch error: %v", err)
 		redirect("error")
 		return
@@ -1289,14 +1491,14 @@ func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	hash, err := hashPassword(newPassword)
 	if err != nil {
 		log.Printf("password hash error: %v", err)
 		redirect("error")
 		return
 	}
 
-	if _, err := s.db.ExecContext(r.Context(), "UPDATE admin_users SET password_hash=$1 WHERE username=$2", string(hash), defaultAdminUser); err != nil {
+	if _, err := s.db.ExecContext(r.Context(), "UPDATE admin_users SET password_hash=$1 WHERE username=$2", hash, username); err != nil {
 		log.Printf("password update error: %v", err)
 		redirect("error")
 		return
@@ -1306,8 +1508,16 @@ func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		log.Printf("password flag refresh error: %v", err)
 	}
 
-	s.issueSession(w, defaultAdminUser)
+	s.issueSession(w, username)
 	redirect("updated")
+}
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
 }
 
 func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
@@ -1346,28 +1556,25 @@ func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := r.Referer()
-	if !strings.HasPrefix(target, s.adminPrefix) {
-		target = s.adminPath("/")
-	}
-
-	http.Redirect(w, r, target, http.StatusSeeOther)
+	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
 }
 
 func (s *server) listSubmissions(ctx context.Context, status string, page, pageSize int, excludeArchived bool) ([]Submission, int, error) {
 	offset := (page - 1) * pageSize
 
 	args := []interface{}{}
-	query := `SELECT id, submitted_at, ip_address, forwarded_for, user_agent, referer, status, file_path, comment, form_data FROM submissions`
-	countQuery := `SELECT COUNT(*) FROM submissions`
+	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, c.name, c.email
+	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id`
+	countQuery := `SELECT COUNT(*) FROM submissions sub`
 
 	whereClauses := []string{}
 	if status != "" {
-		query += " WHERE status = $1"
-		countQuery += " WHERE status = $1"
+		query += " WHERE sub.status = $1"
+		countQuery += " WHERE sub.status = $1"
 		args = append(args, status)
 	} else if excludeArchived {
-		whereClauses = append(whereClauses, "status <> 'archived'")
+		whereClauses = append(whereClauses, "sub.status <> 'archived'")
 	}
 
 	if len(whereClauses) > 0 && status == "" {
@@ -1375,7 +1582,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 		countQuery += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
-	query += " ORDER BY submitted_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
+	query += " ORDER BY sub.submitted_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
 	args = append(args, pageSize, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1387,7 +1594,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	submissions := []Submission{}
 	for rows.Next() {
 		var sub Submission
-		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.CustomerName, &sub.CustomerEmail); err != nil {
 			return nil, 0, err
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
@@ -1410,6 +1617,408 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	}
 
 	return submissions, total, nil
+}
+
+// linkCustomer creates or updates a customer record from a submission's contact
+// fields and returns its id (NULL when no usable email is present).
+func (s *server) linkCustomer(ctx context.Context, payload map[string]interface{}) sql.NullInt64 {
+	email, name, company, phone, address := extractContact(payload)
+	if email == "" {
+		return sql.NullInt64{}
+	}
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO customers (email, name, company, phone, address)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (email) DO UPDATE SET
+		     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
+		     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
+		     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
+		     address = COALESCE(NULLIF(EXCLUDED.address, ''), customers.address),
+		     updated_at = NOW()
+		 RETURNING id`,
+		email, name, company, phone, address,
+	).Scan(&id)
+	if err != nil {
+		log.Printf("link customer error: %v", err)
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: id, Valid: true}
+}
+
+// extractContact pulls contact details from an arbitrary form payload using
+// case-insensitive matching on common field names. Email must look like an
+// address (contain "@") and is lower-cased so records dedupe consistently.
+func extractContact(payload map[string]interface{}) (email, name, company, phone, address string) {
+	normalized := make(map[string]string, len(payload))
+	for k, v := range payload {
+		normalized[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(stringifyValue(v))
+	}
+	pick := func(keys ...string) string {
+		for _, want := range keys {
+			if val := normalized[want]; val != "" {
+				return val
+			}
+		}
+		return ""
+	}
+
+	email, _ = sanitizeEmail(pick("email", "e-mail", "email_address", "emailaddress", "your_email"))
+	name = pick("name", "full_name", "fullname", "your_name", "contact_name")
+	if name == "" {
+		first := pick("first_name", "firstname", "fname")
+		last := pick("last_name", "lastname", "lname")
+		name = strings.TrimSpace(first + " " + last)
+	}
+	company = pick("company", "organization", "organisation", "business", "company_name")
+	phone = pick("phone", "telephone", "phone_number", "tel", "mobile")
+	address = pick("address", "street_address", "mailing_address", "postal_address", "location")
+	return email, name, company, phone, address
+}
+
+func (s *server) listCustomers(ctx context.Context, q, tagFilter string, page, pageSize int) ([]Customer, int, error) {
+	offset := (page - 1) * pageSize
+
+	clauses := []string{}
+	filterArgs := []interface{}{}
+	if q != "" {
+		filterArgs = append(filterArgs, "%"+q+"%")
+		p := "$" + strconv.Itoa(len(filterArgs))
+		clauses = append(clauses, `(c.email ILIKE `+p+` OR c.name ILIKE `+p+` OR c.company ILIKE `+p+` OR c.phone ILIKE `+p+`
+		    OR EXISTS (SELECT 1 FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = c.id AND t.name ILIKE `+p+`))`)
+	}
+	if tagFilter != "" {
+		filterArgs = append(filterArgs, tagFilter)
+		p := "$" + strconv.Itoa(len(filterArgs))
+		clauses = append(clauses, `EXISTS (SELECT 1 FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = c.id AND t.name = `+p+`)`)
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	args := append([]interface{}{}, filterArgs...)
+	query := `SELECT c.id, c.email, c.name, c.company, c.phone, c.created_at, c.updated_at, c.unsubscribed_at, c.bounced_at,
+	    (SELECT COUNT(*) FROM submissions s WHERE s.customer_id = c.id) AS submission_count,
+	    (SELECT string_agg(t.name, ', ' ORDER BY t.name) FROM customer_tags ct JOIN tags t ON t.id = ct.tag_id WHERE ct.customer_id = c.id) AS tag_names
+	    FROM customers c` + where +
+		" ORDER BY c.updated_at DESC LIMIT $" + strconv.Itoa(len(args)+1) + " OFFSET $" + strconv.Itoa(len(args)+2)
+	args = append(args, pageSize, offset)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	customers := []Customer{}
+	for rows.Next() {
+		var c Customer
+		if err := rows.Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt, &c.SubmissionCount, &c.Tags); err != nil {
+			return nil, 0, err
+		}
+		if c.Tags.Valid {
+			c.TagsList = splitTagList(c.Tags.String)
+		}
+		customers = append(customers, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM customers c"+where, filterArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	return customers, total, nil
+}
+
+// getCustomer loads a customer and its linked submissions. Returns a nil
+// customer (no error) when the id does not exist.
+func (s *server) getCustomer(ctx context.Context, id int64) (*Customer, []Submission, error) {
+	var c Customer
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, email, name, company, phone, address, notes, created_at, updated_at, unsubscribed_at, bounced_at
+		 FROM customers WHERE id = $1`, id,
+	).Scan(&c.ID, &c.Email, &c.Name, &c.Company, &c.Phone, &c.Address, &c.Notes, &c.CreatedAt, &c.UpdatedAt, &c.UnsubscribedAt, &c.BouncedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil, nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, submitted_at, ip_address, forwarded_for, user_agent, referer, status, file_path, comment, form_data
+		 FROM submissions WHERE customer_id = $1 ORDER BY submitted_at DESC LIMIT 200`, id,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	subs := []Submission{}
+	for rows.Next() {
+		var sub Submission
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData); err != nil {
+			return nil, nil, err
+		}
+		sub.FormPretty = formatJSON(sub.FormData)
+		sub.Fields = extractFields(sub.FormData)
+		subs = append(subs, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return &c, subs, nil
+}
+
+func (s *server) handleCustomers(w http.ResponseWriter, r *http.Request) {
+	// POST creates a customer manually (forms only carry optional contact
+	// fields, so records often need to be started or completed by hand).
+	if r.Method == http.MethodPost {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		email, ok := sanitizeEmail(r.FormValue("email"))
+		if !ok {
+			http.Error(w, "a valid email is required", http.StatusBadRequest)
+			return
+		}
+		// On an existing email, merge like intake and CSV import: non-empty
+		// form fields win, blanks leave existing data untouched.
+		var id int64
+		err := s.db.QueryRowContext(r.Context(),
+			`INSERT INTO customers (email, name, company, phone, address)
+			 VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), NULLIF($5,''))
+			 ON CONFLICT (email) DO UPDATE SET
+			     name = COALESCE(NULLIF(EXCLUDED.name, ''), customers.name),
+			     company = COALESCE(NULLIF(EXCLUDED.company, ''), customers.company),
+			     phone = COALESCE(NULLIF(EXCLUDED.phone, ''), customers.phone),
+			     address = COALESCE(NULLIF(EXCLUDED.address, ''), customers.address),
+			     updated_at = NOW()
+			 RETURNING id`,
+			email,
+			strings.TrimSpace(r.FormValue("name")),
+			strings.TrimSpace(r.FormValue("company")),
+			strings.TrimSpace(r.FormValue("phone")),
+			strings.TrimSpace(r.FormValue("address")),
+		).Scan(&id)
+		if err != nil {
+			log.Printf("create customer error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		if tags := splitTagList(r.FormValue("tags")); len(tags) > 0 {
+			s.applyTags(r.Context(), id, tags, "manual")
+		}
+		http.Redirect(w, r, s.adminPath("/customers/view?id="+strconv.FormatInt(id, 10)), http.StatusSeeOther)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	// Normalize the tag filter like tag names themselves (lowercase, collapsed
+	// spacing) so hand-typed URLs such as ?tag=VIP match. A value that does not
+	// normalize (invalid characters) is kept as-is: it matches nothing, which
+	// is more honest than silently dropping the filter.
+	tagFilter := strings.TrimSpace(r.URL.Query().Get("tag"))
+	if normalized := normalizeTagName(tagFilter); normalized != "" {
+		tagFilter = normalized
+	}
+
+	customers, total, err := s.listCustomers(r.Context(), q, tagFilter, page, defaultItemsPerPage)
+	if err != nil {
+		log.Printf("list customers error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	allTags, err := s.listTagNames(r.Context())
+	if err != nil {
+		log.Printf("list tags error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	var flash *passwordFlash
+	if imported := r.URL.Query().Get("imported"); imported != "" {
+		flash = &passwordFlash{
+			Message: "Import finished: " + imported + " imported, " + r.URL.Query().Get("skipped") + " skipped.",
+			Kind:    "success",
+		}
+	}
+
+	data := map[string]interface{}{
+		"Customers":   customers,
+		"Query":       q,
+		"TagFilter":   tagFilter,
+		"AllTags":     allTags,
+		"Page":        page,
+		"Total":       total,
+		"PageSize":    defaultItemsPerPage,
+		"Path":        s.adminPath("/customers"),
+		"Flash":       flash,
+		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix": s.adminPrefix,
+	}
+	renderTemplate(w, "templates/customers.html", data)
+}
+
+func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	customer, subs, err := s.getCustomer(r.Context(), id)
+	if err != nil {
+		log.Printf("get customer error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if customer == nil {
+		http.Error(w, "customer not found", http.StatusNotFound)
+		return
+	}
+
+	timeline, err := s.loadTimeline(r.Context(), id)
+	if err != nil {
+		log.Printf("timeline error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	chips, err := s.customerTagChips(r.Context(), id)
+	if err != nil {
+		log.Printf("tag chips error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	allTags, err := s.listTagNames(r.Context())
+	if err != nil {
+		log.Printf("list tags error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	clicks, err := s.customerClickHistory(r.Context(), id)
+	if err != nil {
+		log.Printf("click history error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	memberOf, err := s.customerLists(r.Context(), id)
+	if err != nil {
+		log.Printf("customer lists error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	data := map[string]interface{}{
+		"Customer":    customer,
+		"Submissions": subs,
+		"Timeline":    timeline,
+		"TagChips":    chips,
+		"AllTags":     allTags,
+		"Clicks":      clicks,
+		"MemberOf":    memberOf,
+		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
+		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix": s.adminPrefix,
+	}
+	renderTemplate(w, "templates/customer.html", data)
+}
+
+func (s *server) handleCustomerUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	email := strings.TrimSpace(r.FormValue("email"))
+	if email != "" {
+		sanitized, ok := sanitizeEmail(email)
+		if !ok {
+			http.Error(w, "invalid email", http.StatusBadRequest)
+			return
+		}
+		email = sanitized
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	company := strings.TrimSpace(r.FormValue("company"))
+	phone := strings.TrimSpace(r.FormValue("phone"))
+	address := strings.TrimSpace(r.FormValue("address"))
+	notes := strings.TrimSpace(r.FormValue("notes"))
+
+	for _, field := range []string{name, company, phone} {
+		if len(field) > 500 {
+			http.Error(w, "field too long", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
+	if len(address) > 2000 || len(notes) > 8000 {
+		http.Error(w, "field too long", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	viewURL := s.adminPath("/customers/view?id=" + strconv.FormatInt(id, 10))
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE customers SET email=$1, name=$2, company=$3, phone=$4, address=$5, notes=$6, updated_at=NOW() WHERE id=$7`,
+		nullIfEmpty(email), nullIfEmpty(name), nullIfEmpty(company), nullIfEmpty(phone), nullIfEmpty(address), nullIfEmpty(notes), id,
+	); err != nil {
+		// A duplicate email trips the unique constraint; report it rather than 500.
+		log.Printf("update customer error: %v", err)
+		http.Redirect(w, r, viewURL+"&saved=err", http.StatusSeeOther)
+		return
+	}
+
+	http.Redirect(w, r, viewURL+"&saved=1", http.StatusSeeOther)
+}
+
+func mapCustomerFlash(code string) *passwordFlash {
+	switch code {
+	case "1":
+		return &passwordFlash{Message: "Customer saved.", Kind: "success"}
+	case "err":
+		return &passwordFlash{Message: "Could not save — is that email already used by another customer?", Kind: "error"}
+	default:
+		return nil
+	}
 }
 
 func formatJSON(raw json.RawMessage) string {
@@ -1484,6 +2093,27 @@ func normalizePath(val, def string) string {
 		val = "/"
 	}
 	return val
+}
+
+// adminReferer derives a same-site redirect target from the request's Referer,
+// falling back when it is absent or points outside the admin. Browsers send an
+// absolute URL, so the admin-prefix check must run against the path component;
+// only the path and query are returned, keeping the redirect relative even if
+// the header is forged.
+func (s *server) adminReferer(r *http.Request, fallback string) string {
+	ref := r.Referer()
+	if ref == "" {
+		return fallback
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.HasPrefix(u.Path, s.adminPrefix) {
+		return fallback
+	}
+	target := u.Path
+	if u.RawQuery != "" {
+		target += "?" + u.RawQuery
+	}
+	return target
 }
 
 func (s *server) adminPath(suffix string) string {

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>List · {{.List.Name}}</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>{{.List.Name}}</h1>
+        <p class="lede">{{if .List.Description.Valid}}{{.List.Description.String}} · {{end}}{{len .Members}} member(s)</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/lists">← Lists</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Add member</h2>
+        <p>Add an existing customer by email address.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/lists/view">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="action" value="add">
+        <input type="hidden" name="id" value="{{.List.ID}}">
+        <label>Email<input type="email" name="email" required></label>
+        <button type="submit">Add to list</button>
+      </form>
+    </section>
+
+    <section class="password-card">
+      <div>
+        <h2>Segment tools</h2>
+        <p>Bulk-add customers by tag match or recent form activity. Existing members are left untouched.</p>
+      </div>
+      <div class="segment-forms">
+        <form method="post" action="{{.AdminPrefix}}/lists/view">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="addtag">
+          <input type="hidden" name="id" value="{{.List.ID}}">
+          <label>Tag
+            <select name="tag" required>
+              {{range .AllTags}}<option value="{{.}}">{{.}}</option>{{end}}
+            </select>
+          </label>
+          <button type="submit">Add tagged</button>
+        </form>
+        <form method="post" action="{{.AdminPrefix}}/lists/view">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="addrecent">
+          <input type="hidden" name="id" value="{{.List.ID}}">
+          <label>Submitted within (days)<input type="number" name="days" min="1" max="3650" value="90" required></label>
+          <button type="submit">Add recent</button>
+        </form>
+      </div>
+    </section>
+
+    {{if .Mailings}}
+    <section class="customers">
+      <h2>Mailings targeted at this list</h2>
+      <table class="table">
+        <thead><tr><th>Subject</th><th>Status</th><th>Sent</th></tr></thead>
+        <tbody>
+          {{range .Mailings}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/mailings/view?id={{.ID}}">{{.Subject}}</a></td>
+            <td><span class="status-pill {{.Status}}">{{.Status}}</span></td>
+            <td>{{if .SentAt.Valid}}{{.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+
+    <section class="customers">
+      {{if not .Members}}
+      <p>No members yet.</p>
+      {{else}}
+      <table class="table">
+        <thead><tr><th>Email</th><th>Name</th><th>Company</th><th>Added</th><th></th></tr></thead>
+        <tbody>
+          {{range .Members}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/customers/view?id={{.CustomerID}}">{{.Email.String}}</a>{{if .Unsubbed}} <span class="status-pill archived">unsubscribed</span>{{end}}</td>
+            <td>{{.Name.String}}</td>
+            <td>{{.Company.String}}</td>
+            <td>{{.AddedAt.Format "2006-01-02"}}</td>
+            <td>
+              <form method="post" action="{{$.AdminPrefix}}/lists/view" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="action" value="remove">
+                <input type="hidden" name="id" value="{{$.List.ID}}">
+                <input type="hidden" name="customer_id" value="{{.CustomerID}}">
+                <button type="submit" class="danger">Remove</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{end}}
+    </section>
+  </div>
+</body>
+</html>

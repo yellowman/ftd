@@ -1,230 +1,395 @@
-# ftd Form To-Do
+# ftd
 
-Yet another form handler. FastCGI Form Collector which turns submissions into to-do items for manual completion. Form fields are arbitrary and stored as submitted in JSON format. This project provides a minimal FastCGI listener for HTML form submissions, backed by PostgreSQL storage and an authenticated admin dashboard served over FastCGI.
+FastCGI form collector and mini-CRM. HTML forms post to it, submissions become
+to-do items in an admin dashboard, and submitters become customer records you
+can organize into lists and send tracked mailings to. Single Go binary,
+PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 
 ## Features
-- **FastCGI listener** on a Unix domain socket for dynamic form submissions and the admin dashboard (served via the same socket),
-  with an optional TCP FastCGI listener via `-tcp <port>`.
-- **PostgreSQL persistence** with JSONB storage for arbitrary form fields and request metadata (real source IP, the client-supplied `X-Forwarded-For` header, user agent, referrer, timestamp). Both the trusted peer address and the forwarded header are stored as-is — the forwarded value is attacker-controllable, so treat it accordingly when reviewing.
-- **Admin dashboard** with login (bcrypt passwords stored in the database), pagination, status management (`new`, `in_progress`, `complete`, `archived`), CSRF protection, hardened cookies, and nicely formatted JSON payloads.
-- **Built-in throttling** that blocks abusive IPs (over 4 submissions per minute) for 24 hours and temporarily pauses all submissions for 5 minutes when a burst of distinct IPs appears.
-- **Request caps** to protect the FastCGI endpoint from floods (64KB body and 200-field limit, with an adjustable upload budget on top).
-- **Optional file capture** that, when enabled, stores an uploaded file inside the `_ftd` chroot with a unique timestamped name and records both the stored path and the original filename alongside the submission JSON. File uploads are disabled by default.
-- **Sample submitter forms**: `sample_form.html` (no file upload) and `sample_form_upload.html` (includes a single file field) that post to the FastCGI endpoint.
 
-## Configuration
-Set the following environment variables before running the server:
+- Accepts arbitrary form fields (stored as JSONB) plus request metadata; optional single file upload.
+- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
+- CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
+- Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
+- Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
+- Reply capture: route your Reply-To mailbox into ftd (Postfix LMTP or a pipe helper) and customer replies appear as new to-do submissions linked to their customer record.
+- Rate limiting: 8 submissions/minute per IP with a 1-hour block (both env-tunable), global 5-minute pause on bursts of 30+ distinct IPs. Blocked requests get HTTP 429 with `Retry-After`.
 
-| Variable | Description | Default |
-| --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string (e.g., `postgres://user:pass@localhost:5432/forms`). Append `?sslmode=disable` for a local server without TLS, or use `sslmode=require`/`verify-full` for remote databases. | **Required** |
-| `FASTCGI_SOCKET` | Unix socket path for the FastCGI listener. | `/var/www/run/ftd.sock` |
-| `FORM_PATH` | FastCGI path for submissions. | `/form` |
-| `ADMIN_PREFIX` | FastCGI path prefix for the admin dashboard (login, dashboard, static). | `/form/admin` |
-| `SESSION_SECRET` | Secret used to sign admin session cookies; if omitted, an ephemeral random key is generated (sessions reset on restart). | Generated per process when unset |
-| `SESSION_COOKIE_INSECURE` | If set, disables the default `Secure` cookie flag for admin/csrf cookies (useful for plain HTTP dev). | Not set (Secure cookies enabled) |
-| `MAX_UPLOAD_MB` | Maximum allowed file upload size in megabytes; `0` disables uploads. | `0` |
-
-## Database schema
-Initialize the schema before the first run (ftd does not apply migrations at runtime and will exit if required tables are missi
-ng):
+## Quick start (any platform)
 
 ```sh
-psql "$DATABASE_URL" -f schema.sql
+go mod tidy                     # first build only: fetch deps, write go.sum
+go build -o /usr/local/bin/ftd
+createdb ftd
+psql ftd < schema.sql           # idempotent; re-run it after upgrades
+DATABASE_URL="postgres://user:pass@localhost/ftd?sslmode=disable" ftd -tcp 9000
 ```
 
-The schema creates `submissions` (with metadata, optional stored file path, reviewer comment, and JSONB payload), `admin_users` (bcrypt password hashes), and `submission_blocks` (temporary throttling windows). Indexes are added for status filtering and date ordering to keep pagination fast.
-The schema also seeds a default admin account (`admin` / `change-me`); the dashboard will display a red reminder until you change it via the password form.
+Point a FastCGI-capable web server at TCP 9000 (or at the Unix socket, see
+below), then log in at `/form/admin/` as `admin` / `change-me` and change the
+password. Sample forms: `sample_form.html`, `sample_form_upload.html`.
 
-### Database role permissions
-The role in `DATABASE_URL` needs read/write access to the tables **and** the `submissions_id_seq` sequence (submission IDs are `SERIAL`). The simplest option is to create the schema as that role so it owns everything:
+(Inline environment variables work for one-off runs like this; for a real
+install put the settings in `/etc/ftd.conf` — see Configuration.)
 
-```sh
-psql -U <appuser> "$DATABASE_URL" -f schema.sql
-```
-
-If the schema was created by a different role (e.g. `postgres`), grant the app role explicitly — otherwise you will see `permission denied for table admin_users` at startup and `permission denied for sequence submissions_id_seq` on the first submission:
+**Database permissions:** the role in `database_url` needs the tables *and*
+sequences. Easiest is to run `schema.sql` as that role so it owns everything.
+Otherwise, as the owner:
 
 ```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO <appuser>;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO <appuser>;
--- cover objects created later, too:
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO <appuser>;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO <appuser>;
-```
-If you prefer to rotate the password directly from `psql` instead of using the dashboard, run these single-line commands at the `psql>` prompt to enable `pgcrypto` and set a new bcrypt hash for the admin account:
-
-```
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-UPDATE admin_users SET password_hash = crypt('your-new-password', gen_salt('bf')) WHERE username = 'admin';
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ftd;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ftd;
 ```
 
-## Building
-
-This is a standard Go module (Go 1.22+). Before your first build, fetch the
-dependencies and write `go.sum`:
+## OpenBSD setup (httpd)
 
 ```sh
+# 1. Packages and service account
+pkg_add go postgresql-server postgresql-client
+useradd -m _ftd
+
+# 2. Database
+su - _postgresql -c "createdb ftd"
+psql ftd < schema.sql
+
+# 3. Build
 go mod tidy
+go build -o /usr/local/bin/ftd
+
+# 4. Socket directory for httpd
+install -d -m 750 -o _ftd -g www /var/www/run
 ```
 
-Then build the binary:
+`/etc/httpd.conf`:
+
+```
+server "example.com" {
+    listen on * port 80
+
+    location "/form"         { fastcgi socket "/var/www/run/ftd.sock" }
+    location "/form/t/*"     { fastcgi socket "/var/www/run/ftd.sock" }
+    location "/form/admin/*" { fastcgi socket "/var/www/run/ftd.sock" }
+}
+```
+
+Configuration and startup (the daemon reads `/etc/ftd.conf` itself; see the
+Configuration section):
 
 ```sh
-go build -o /usr/local/bin/ftd
+install -m 755 rc.d/ftd /etc/rc.d/ftd
+install -m 640 ftd.conf /etc/ftd.conf
+vi /etc/ftd.conf      # uncomment and set database_url and session_secret
+
+rcctl enable httpd ftd
+rcctl start httpd ftd
 ```
 
-`go mod tidy` downloads `github.com/lib/pq`, `golang.org/x/crypto`, and
-`golang.org/x/sys` (the last is used for OpenBSD `pledge(2)`), so make sure
-outbound module downloads are permitted by your environment. You only need to
-re-run it after changing dependencies; routine rebuilds can call `go build`
-directly.
+Log in at `http://example.com/form/admin/` (`admin` / `change-me`) and change
+the password. Templates and CSS are embedded in the binary — nothing to copy
+into the chroot.
 
-## Running locally
-1. Export the required environment variables (see above).
-2. Fetch dependencies (first run only): `go mod tidy`.
-3. Start the service:
-   ```sh
-   go run .
-   ```
-4. Point your FastCGI-capable web server at the configured socket (default `/var/www/run/ftd.sock`) for both form and admin paths. The service defaults to `/form` for submissions and `/form/admin` for the dashboard, configurable via `FORM_PATH` and `ADMIN_PREFIX` env vars.
-   Alternatively, start the service with `-tcp 9000` (or another port) and configure your front-end to FastCGI proxy to `127.0.0.1:9000`.
-5. Serve `sample_form.html` via your web server (or open from disk) and point its `action` at `/form` (or your `FORM_PATH`) on your FastCGI front-end. Access the admin dashboard through the same front-end at `/form/admin/` (or your `ADMIN_PREFIX`). To redirect submitters to a thank-you page after a successful submission, include a hidden field named `redirect`; the handler issues a 303 See Other to that target once the form is stored. To avoid the endpoint being abused as an open redirect, the target must be either a root-relative path (e.g. `/thank-you`) or an absolute `http(s)` URL whose host matches the request host. Cross-host URLs, protocol-relative URLs (`//host`), and other schemes are rejected with HTTP 400.
+## Linux setup (nginx + systemd)
 
-## File uploads
-- Uploads are **disabled by default**. Set `MAX_UPLOAD_MB` to a positive integer to allow a single file upload per submission, capped to that size and counted against the FastCGI body budget.
-- Uploaded files are stored under `uploads/` inside the `_ftd` chroot (created on demand) using names like `ftd.20240101T000000Z,89abcd12`. The stored path lives in the `file_path` column, and both the stored name and any client-supplied original name are injected into the `form_data` JSON as `_upload_stored_filename` and `_upload_original_filename`. When a write fails, the row keeps `Failed Upload (<status code>)` in `file_path` and in `_upload_stored_filename` so reviewers can see the error.
-- The lightweight sample `sample_form.html` remains text-only; use `sample_form_upload.html` for an upload-capable example (with `enctype="multipart/form-data"`).
+```sh
+# 1. Packages and service account
+sudo apt-get install -y golang postgresql nginx
+sudo useradd -m -s /usr/sbin/nologin _ftd
 
-## Status workflow
-Rows start as `new`. The admin UI lets you move them to `in_progress`, `complete`, or `archived`. Completed submissions remain available but collapse into the lower section; archived items stay out of the main dashboard and live in the dedicated Archived view with its own pagination. A bulk "Archive completed" control is available on the Active dashboard to sweep all completed rows into the archived view at once. Each submission also supports an internal reviewer comment field; it can be edited alongside status updates and is rendered in a muted, read-only state when the submission is archived.
+# 2. Database
+sudo -u postgres createdb -O ftd ftd     # after: sudo -u postgres createuser ftd
+psql -U ftd ftd < schema.sql
 
-## Rate limiting
-- Each client IP may submit at most **4 forms per rolling minute**. Exceeding that threshold blocks the IP for 24 hours and returns HTTP 429 with a `Retry-After` hint.
-- If a sudden burst of **30 or more distinct IPs** arrives within a minute, the service pauses all submissions for 5 minutes to mitigate abuse and returns HTTP 503 with `Retry-After`.
-- Block information is stored in the `submission_blocks` table; expired blocks are cleaned when new requests arrive.
+# 3. Build
+go mod tidy
+go build -o /usr/local/bin/ftd
+
+# 4. Socket directory for nginx
+sudo install -d -m 750 -o _ftd -g www-data /var/www/run
+```
+
+`/etc/nginx/sites-available/ftd.conf` (then symlink into `sites-enabled` and reload):
+
+```
+server {
+    listen 80;
+    server_name example.com;
+
+    location /form {
+        include fastcgi_params;
+        fastcgi_pass unix:/var/www/run/ftd.sock;
+    }
+}
+```
+
+(The `/form` prefix also covers `/form/admin/` and `/form/t/`; add explicit
+blocks only if you move `ADMIN_PREFIX`/`TRACK_PATH` elsewhere.)
+
+`/etc/systemd/system/ftd.service`:
+
+```
+[Unit]
+Description=ftd form collector
+After=network.target postgresql.service
+
+[Service]
+ExecStart=/usr/local/bin/ftd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo install -m 640 ftd.conf /etc/ftd.conf
+sudo vi /etc/ftd.conf     # uncomment and set database_url and session_secret
+sudo systemctl enable --now ftd
+```
+
+Started as root, ftd opens its sockets, chroots to `_ftd`'s home, and drops
+privileges. Log in at `/form/admin/` and change the default password.
+
+## Configuration
+
+ftd configures itself from `/etc/ftd.conf` (postfix-style, lowercase
+`key = value`, `#` comments; override the path with `-config`). The repo ships
+an `ftd.conf` example listing every option, commented out — install it and
+uncomment what you need. Environment variables with the same name in uppercase
+(`database_url` → `DATABASE_URL`) override the file, which is handy for
+development and one-off runs.
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `database_url` | PostgreSQL connection string. Add `?sslmode=disable` for a local non-TLS server; use `sslmode=require`/`verify-full` for remote ones. | **Required** |
+| `fastcgi_socket` | Unix socket path for the FastCGI listener (ignored with `-tcp`). | `/var/www/run/ftd.sock` |
+| `form_path` | Submission endpoint path. | `/form` |
+| `admin_prefix` | Admin dashboard path prefix. | `/form/admin` |
+| `track_path` | Public tracking endpoints prefix (`/open`, `/c`, `/unsub`, `/img`). | `/form/t` |
+| `session_secret` | Signs admin session cookies. Unset = random per-process key (sessions reset on restart). | Generated |
+| `session_cookie_insecure` | Set to drop the `Secure` cookie flag (plain-HTTP dev only). | Not set |
+| `max_upload_mb` | Max file upload size in MB; `0` disables uploads. | `0` |
+| `rate_limit_per_min` | Submissions allowed per IP per rolling minute before a block. Size it above the number of forms a legitimate visitor might submit in one sitting. | `8` |
+| `rate_block_minutes` | How long an IP that exceeds the limit is blocked. | `60` |
+| `smtp_host` / `smtp_port` | SMTP relay for mailings. Sending is disabled until `smtp_host` and `mail_from` are set. | Not set / `25` |
+| `smtp_user` / `smtp_pass` | Optional SMTP AUTH (PLAIN; STARTTLS used when offered). | Not set |
+| `mail_from` | From address for mailings. | Not set |
+| `public_base_url` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
+| `reply_to` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
+| `reply_lmtp_socket` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
+
+Flags: `-tcp <port>` listens on TCP instead of the Unix socket;
+`-c <path>` (or `-config <path>`) selects the configuration file; `-deliver`
+(with optional `-c`) files one email from stdin and exits. On OpenBSD, pass
+daemon flags through rc.d as usual — e.g. an alternate config:
+`rcctl set ftd flags -c /etc/ftd2.conf`.
+
+## Using it
+
+**Forms** — point any form's `action` at `/form`. All fields are stored as
+submitted. A hidden `redirect` field sends the submitter to a thank-you page
+afterward; the target must be a root-relative path or a same-host URL
+(cross-host redirects are rejected). With `MAX_UPLOAD_MB` set, one file field
+per form is accepted and stored under `uploads/` in the chroot.
+
+**Customers** — submissions with a recognizable `email` field auto-create or
+update a customer (name/company/phone/address are picked up too; blank fields
+never overwrite existing data). Create or complete records by hand on the
+Customers page, or bulk-load them with CSV import (needs an `email` column;
+rows upsert by email). The exported `unsubscribed`/`bounced` columns are
+honored on import: `true` applies the suppression, `false` or blank leaves
+existing state untouched — a re-import can never make a suppressed address
+mailable again. Each customer page has the editable profile, an
+activity timeline (notes/calls/emails/meetings + automatic mailing history),
+and their submissions.
+
+**Tags** — the interest system. Tags live in a normalized vocabulary
+(lowercase; manage it on the Tags page) and attach to customers with a
+recorded source, shown as colored chips: **manual** (set by hand on the
+customer page), **form** (a submitted form carried a — usually hidden —
+`tags` field, e.g. `<input type="hidden" name="tags" value="widgets,pricing">`,
+so each form self-classifies its submitters), **click** (the customer clicked
+a link in a mailing that had tags — interest declared by behavior), and
+**import** (CSV). Filter the directory by tag, click a tag on the Tags page to
+see its customers, and use the list segment tool to turn a tag into a mailing
+audience. Each customer page also lists exactly which mailing links they
+clicked, when, and how often.
+
+**Users** — the schema seeds `admin` / `change-me`. Add your team on the Users
+page; the dashboard password form changes the logged-in user's password.
+
+**Lists & mailings** — group customers into lists by email, or bulk-add by tag
+/ recent submitters. Compose in the built-in WYSIWYG editor (bold/lists/
+headings/links/CTA buttons, with an HTML-source toggle for hand editing —
+plain textarea if JavaScript is off), upload images to the media library and
+insert them (stored in Postgres, served publicly under `TRACK_PATH/img` so
+mail clients can fetch them), and check layout in the live preview pane, which
+renders the saved draft in a mail-client-style frame and marks where the
+unsubscribe link and tracking pixel land. Pick a list (or all customers),
+optionally tag the mailing (clickers inherit its tags), test-send it to
+yourself, then send. At send time the composed content is wrapped in a
+bulletproof table layout (MSO conditionals, 600px centered presentation
+table, inlined fonts) so it renders correctly in Outlook and friends — the
+preview shows the exact same skeleton. Compose only the content; if you paste
+a full `<html>` document instead, it is sent verbatim as the power-user
+escape hatch. Messages go out as `multipart/alternative` with an
+auto-generated plain-text version (links become `text (url)`, lists become
+bullets), so text-only mail clients get clean text instead of raw HTML.
+Interrupted deliveries (crash/restart mid-send) resume automatically on
+startup: never-attempted recipients are mailed, while recipients caught
+mid-delivery are marked failed with an "interrupted" note instead of being
+auto-resent — SMTP may already have accepted those messages, and ftd never
+risks automatic duplicates. Redeliver them deliberately with the "Retry
+failed recipients" button. Mail goes out over the SMTP
+relay in the background; the mailing page shows per-recipient delivery, opens,
+clicks, and per-link click totals. Every message carries an unsubscribe link
+and `List-Unsubscribe` header (when `public_base_url` is set); unsubscribed
+customers and hard-bounced addresses (SMTP 5xx) are skipped automatically.
+Bounces can be cleared from the customer page. Async bounces that arrive at
+your relay's return-path mailbox are outside ftd's view — handle those at the
+relay.
+
+**Replies become to-dos** — when a customer answers a mailing, the reply can
+land straight in the submission inbox as a new to-do card, linked to their
+customer record (the text body, decoded subject, and sender are extracted;
+bounces and auto-responders are discarded). Set `reply_to` to the mailbox
+address, then route that address into ftd with Postfix either way:
+
+*LMTP (recommended — Postfix delivers into the running daemon):*
+
+```
+# /etc/ftd.conf
+reply_to = sales@example.com
+reply_lmtp_socket = /var/www/run/ftd-lmtp.sock
+```
+
+```
+# /etc/postfix/main.cf
+transport_maps = hash:/etc/postfix/transport
+# /etc/postfix/transport
+sales@example.com  lmtp:unix:/var/www/run/ftd-lmtp.sock
+```
+
+Run `postmap /etc/postfix/transport && postfix reload`. If your `master.cf`
+runs the `lmtp` agent chrooted (Debian default), either set its chroot column
+to `n` or place the socket under `/var/spool/postfix/` and adjust the path.
+ftd creates the socket mode 0660 — make it connectable by Postfix (e.g.
+`chgrp postfix` on the socket or run the socket directory group-shared).
+
+*Pipe helper (simplest — Postfix invokes ftd per message):*
+
+```
+# /etc/aliases
+sales: "|/usr/local/bin/ftd -deliver"
+```
+
+Run `newaliases`. The helper reads one message on stdin, loads
+`/etc/ftd.conf` itself (override the path with `-config`), files the reply,
+and exits with sysexits codes so transient database problems are requeued
+rather than bounced.
+
+**Deliverability** — publish SPF, sign with DKIM at the relay (setups below),
+and set rDNS/PTR for the relay IP, or expect spam-foldering.
+
+## DKIM signing at the relay
+
+ftd hands mail to your local MTA (`smtp_host = 127.0.0.1`); the MTA signs it on
+the way out. Either recipe below ends with the same DNS step.
+
+### OpenBSD: OpenSMTPD + filter-dkimsign
+
+```sh
+pkg_add opensmtpd-filter-dkimsign
+
+# 2048-bit RSA key, readable only by the filter user
+install -d -o _dkimsign -g _dkimsign -m 700 /etc/mail/dkim
+openssl genrsa -out /etc/mail/dkim/example.com.key 2048
+chown _dkimsign:_dkimsign /etc/mail/dkim/example.com.key
+chmod 400 /etc/mail/dkim/example.com.key
+```
+
+`/etc/mail/smtpd.conf` — add the filter and attach it to the listener ftd
+submits on (pick any selector name; the year works well):
+
+```
+filter "dkimsign" proc-exec "filter-dkimsign -d example.com -s 2026 \
+    -k /etc/mail/dkim/example.com.key" user _dkimsign group _dkimsign
+
+listen on socket filter "dkimsign"
+listen on lo0 filter "dkimsign"
+
+action "outbound" relay
+match from local for any action "outbound"
+```
+
+```sh
+rcctl restart smtpd
+```
+
+### Postfix + OpenDKIM (Debian/Ubuntu flavored)
+
+```sh
+sudo apt-get install -y opendkim opendkim-tools
+sudo mkdir -p /etc/opendkim/keys/example.com
+sudo opendkim-genkey -D /etc/opendkim/keys/example.com -d example.com -s 2026
+sudo chown -R opendkim:opendkim /etc/opendkim/keys
+```
+
+Append to `/etc/opendkim.conf` (simple single-domain setup):
+
+```
+Domain    example.com
+Selector  2026
+KeyFile   /etc/opendkim/keys/example.com/2026.private
+Socket    inet:8891@127.0.0.1
+```
+
+Append to `/etc/postfix/main.cf`:
+
+```
+smtpd_milters = inet:127.0.0.1:8891
+non_smtpd_milters = $smtpd_milters
+milter_default_action = accept
+```
+
+```sh
+sudo systemctl restart opendkim postfix
+```
+
+### DNS record (both setups)
+
+Publish the public key as a TXT record at `2026._domainkey.example.com`:
+
+```
+2026._domainkey.example.com. IN TXT "v=DKIM1; k=rsa; p=<base64 public key>"
+```
+
+With OpenDKIM the ready-made record is in
+`/etc/opendkim/keys/example.com/2026.txt`. For the OpenSMTPD key, print the
+`p=` value with:
+
+```sh
+openssl rsa -in /etc/mail/dkim/example.com.key -pubout -outform der | openssl base64 -A
+```
+
+Verify by mailing a Gmail address and checking "show original" for
+`DKIM: PASS`, or use a tester like mail-tester.com. When you rotate keys,
+pick a new selector, publish the new TXT record, then switch the signer.
+
+## Security notes
+
+- Set a strong `SESSION_SECRET` and change the default admin password immediately (the UI nags until you do).
+- Terminate TLS at the web server. Rate limiting keys on the FastCGI peer address (`REMOTE_ADDR`); a client-supplied `X-Forwarded-For` is stored for reference but never trusted.
+- Started as root, ftd chroots to `_ftd`'s home and drops privileges after opening its sockets; on OpenBSD it then pledges down to the minimal promises needed to serve.
+- Admin POSTs require CSRF tokens; cookies are `Secure`/`HttpOnly`/`SameSite=Strict`; responses carry restrictive security headers.
+- Submission bodies are capped at 64KB (+ upload budget) and 200 fields.
+- The click-tracking redirect resolves URLs server-side by id and the submission `redirect` field is restricted to same-host targets — neither can be abused as an open redirect.
 
 ## Files
-- `main.go` – FastCGI listener, admin routes, and handlers.
-- `schema.sql` – PostgreSQL schema and indexes.
-- `templates/` – Admin HTML templates.
-- `static/` – Admin CSS assets.
-- `sample_form.html` – Example HTML form posting to the FastCGI endpoint.
-- `rc.d/ftd` – OpenBSD `rc.d` helper that loads `/etc/ftd.env` and backgrounds the daemon under `rcctl`.
 
-## Security considerations
-- Set a strong `SESSION_SECRET` before first run; if you omit it, the server will generate a random per-process key and all sessions will be invalidated on restart. The initial admin account (`admin`) ships in the schema with password `change-me`—the dashboard surfaces a warning until you change it via the built-in password form.
-- Admin sessions are signed (with refresh-on-activity to avoid logging out active tabs) and constrained with `Secure`, `HttpOnly`, and `SameSite=Strict` flags by default. Set `SESSION_COOKIE_INSECURE=1` only for non-TLS local testing.
-- CSRF tokens are required on admin POSTs (login and status updates) and validated against secure cookies.
-- Admin responses set conservative security headers (CSP, frame-ancestors deny, referrer/permissions policies, cache disabling, MIME sniff protection) to reduce injection and clickjacking risk.
-- Submission bodies are capped (64KB) and oversized/overlong forms are rejected to slow data flooding.
-- Post-submission redirects (`redirect` field) are restricted to the request host or root-relative paths, so the public endpoint cannot be used as an open redirect for phishing.
-- Terminate TLS at your front-end web server (nginx/httpd). The app records the connection peer (`REMOTE_ADDR`, as supplied by the front-end over FastCGI) as the trusted source IP and keys rate limiting on it; if the front-end also forwards an `X-Forwarded-For` header, that client-supplied value is stored verbatim alongside it for reference. The forwarded header is never trusted for rate limiting because it can be spoofed.
-- Restrict filesystem permissions on the FastCGI socket (`FASTCGI_SOCKET`) so only the web server can connect. The socket is created before chroot/drop-privilege when starting as `root`.
-- If the process starts as `root`, it will chroot to the `_ftd` user's home and drop privileges to that account after opening the PostgreSQL socket and FastCGI listener. Create the `_ftd` user and ensure its home directory exists before launching.
-- On OpenBSD, pledge(2) is applied as the final lockdown: the process first opens its sockets, connects to PostgreSQL, and (when started as root) chroots and drops privileges, then pledges down to the minimal promises needed to serve requests (`stdio inet`, plus `unix` for a Unix socket and `rpath wpath cpath` only when uploads are enabled). pledge must come last because `chroot(2)` and the setuid family are not permitted once a process is pledged.
-
-## Deployment recipes
-
-### OpenBSD httpd (FastCGI over Unix socket)
-1. Install dependencies and create the service account:
-   ```sh
-   pkg_add go postgresql-client
-   useradd -m _ftd
-   ```
-2. Initialize the database schema and admin user (replace credentials as needed):
-   ```sh
-   createdb ftd
-   psql ftd < schema.sql
-   go mod tidy
-   env \
-    DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>" \
-    go build -o /usr/local/bin/ftd
-   ```
-   `go mod tidy` only needs to run once (or after dependency changes) to fetch modules and write `go.sum`. Other environment variables use the defaults noted in the Configuration table; override them if you need a custom socket path or URL prefixes.
-3. Create the run directory and permissions for httpd:
-   ```sh
-   install -d -m 750 -o _ftd -g www /var/www/run
-   ```
-4. Configure `/etc/httpd.conf`:
-   ```
-   server "example.com" {
-       listen on * port 80
-
-       location "/form" {
-           fastcgi socket "/var/www/run/ftd.sock"
-       }
-
-       location "/form/admin/*" {
-           fastcgi socket "/var/www/run/ftd.sock"
-       }
-   }
-   ```
-5. Templates and admin static assets are embedded in the binary and served from the `_ftd` chroot (the `_ftd` user home). You do **not** need to copy the `templates/` or `static/` directories to the filesystem; only place the sample HTML forms in your web root if you want to expose them directly.
-6. Install the provided `rc.d` helper and supply environment via `/etc/ftd.env`:
-   ```sh
-   install -m 755 rc.d/ftd /etc/rc.d/ftd
-   cat <<'EOF' > /etc/ftd.env
-DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>"
-# Optional overrides: FASTCGI_SOCKET, FORM_PATH, ADMIN_PREFIX, SESSION_SECRET, MAX_UPLOAD_MB, etc.
-EOF
-   ```
-7. Enable and start the services (the daemon opens sockets before chrooting/dropping to `_ftd`):
-    ```sh
-    rcctl enable httpd
-    rcctl start httpd
-    rcctl enable ftd
-    rcctl start ftd
-    ```
-8. Log into the dashboard at `/form/admin/` with `admin` / `change-me`, then update the password using the on-page form (a warning remains until you do).
-
-### Linux + nginx (FastCGI over Unix socket)
-1. Install dependencies and create the service account:
-   ```sh
-   sudo apt-get update && sudo apt-get install -y golang postgresql-client nginx
-   sudo useradd -m -s /usr/sbin/nologin _ftd
-   ```
-2. Initialize the database schema and admin user:
-   ```sh
-   createdb ftd
-   psql ftd < schema.sql
-   go mod tidy
-   env \
-    DATABASE_URL="postgres://<user>:<pass>@<host>:<port>/<db>" \
-    go build -o /usr/local/bin/ftd
-   ```
-   `go mod tidy` only needs to run once (or after dependency changes) to fetch modules and write `go.sum`. All other environment variables keep their documented defaults unless you override them (e.g., socket path or URL prefixes).
-3. Prepare the FastCGI socket path for nginx:
-   ```sh
-   sudo install -d -m 750 -o _ftd -g www-data /var/www/run
-   ```
-4. Configure nginx (e.g., `/etc/nginx/sites-available/ftd.conf`):
-   ```
-   server {
-       listen 80;
-       server_name example.com;
-
-       location /form {
-           include fastcgi_params;
-           fastcgi_pass unix:/var/www/run/ftd.sock;
-       }
-
-       location /form/admin/ {
-           include fastcgi_params;
-           fastcgi_pass unix:/var/www/run/ftd.sock;
-       }
-   }
-   ```
-   Enable the site and reload nginx:
-   ```sh
-   sudo ln -s /etc/nginx/sites-available/ftd.conf /etc/nginx/sites-enabled/ftd.conf
-   sudo nginx -t
-   sudo systemctl reload nginx
-   ```
-5. Templates and admin static assets are embedded in the binary and served from the `_ftd` chroot (the `_ftd` user home). There is no need to copy `templates/` or `static/` onto the host filesystem; only publish the sample HTML forms if you wish to serve them directly.
-6. Run the FastCGI service (with socket creation before chroot/drop-privilege):
-   ```sh
-   sudo -u _ftd /usr/local/bin/ftd
-   ```
-7. Sign in at `/form/admin/` as `admin` / `change-me` and rotate the password via the dashboard form; the UI warns while the default remains.
-
+- `main.go` – listener, intake, auth, dashboard, customers.
+- `crm.go` – users, lists, mailings, SMTP sending, tracking endpoints.
+- `inbound.go` – reply ingestion: LMTP listener and the `-deliver` stdin helper.
+- `schema.sql` – idempotent schema; run it for installs *and* upgrades.
+- `templates/`, `static/` – admin UI (embedded into the binary at build time).
+- `sample_form.html`, `sample_form_upload.html` – example forms.
+- `ftd.conf` – example configuration listing every option, commented out; install to `/etc/ftd.conf`.
+- `rc.d/ftd` – OpenBSD rc.d script.

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Customers</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>Customers</h1>
+        <p class="lede">Contacts built from form submissions. Search, review history, and keep records current.</p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
+          <a href="{{.AdminPrefix}}/customers" class="active">Customers</a>
+          <a href="{{.AdminPrefix}}/tags">Tags</a>
+          <a href="{{.AdminPrefix}}/lists">Lists</a>
+          <a href="{{.AdminPrefix}}/mailings">Mailings</a>
+          <a href="{{.AdminPrefix}}/users">Users</a>
+        </nav>
+        <form method="get" action="{{.AdminPrefix}}/customers" class="filter">
+          <label>Search
+            <input type="text" name="q" value="{{.Query}}" placeholder="email, name, company, tag…">
+          </label>
+          <label>Tag
+            <select name="tag">
+              <option value="">Any</option>
+              {{range .AllTags}}
+              <option value="{{.}}" {{if eq . $.TagFilter}}selected{{end}}>{{.}}</option>
+              {{end}}
+            </select>
+          </label>
+          <button type="submit">Filter</button>
+        </form>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>New customer</h2>
+        <p>Create a record by hand — forms only carry whatever optional fields the submitter filled in, so complete the rest here.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label>Email<input type="email" name="email" required></label>
+        <label>Name<input type="text" name="name"></label>
+        <label>Company<input type="text" name="company"></label>
+        <label>Phone<input type="text" name="phone"></label>
+        <label>Address<input type="text" name="address"></label>
+        <label>Tags<input type="text" name="tags" placeholder="comma,separated"></label>
+        <button type="submit">Create customer</button>
+      </form>
+    </section>
+
+    <section class="password-card">
+      <div>
+        <h2>Import / export</h2>
+        <p>CSV with an <code>email</code> column (plus optional name, company, phone, address, tags, notes). Rows upsert by email; blanks never overwrite existing data.</p>
+        <p><a class="export-link" href="{{.AdminPrefix}}/customers/export">Download customers.csv</a></p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/import" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label class="full">CSV file<input type="file" name="file" accept=".csv,text/csv" required></label>
+        <button type="submit">Import CSV</button>
+      </form>
+    </section>
+
+    <section class="customers">
+      {{if not .Customers}}
+      <p>No customers found{{if .Query}} for “{{.Query}}”{{end}}.</p>
+      {{else}}
+      <table class="table">
+        <thead>
+          <tr><th>Name</th><th>Email</th><th>Company</th><th>Tags</th><th>Subs</th><th>Status</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {{range .Customers}}
+          <tr>
+            <td><a href="{{$.AdminPrefix}}/customers/view?id={{.ID}}">{{if .Name.Valid}}{{.Name.String}}{{else}}—{{end}}</a></td>
+            <td>{{.Email.String}}</td>
+            <td>{{.Company.String}}</td>
+            <td class="tags-cell">{{range .TagsList}}<a class="assoc" href="{{$.AdminPrefix}}/customers?tag={{.}}">{{.}}</a> {{end}}</td>
+            <td>{{.SubmissionCount}}</td>
+            <td>
+              {{if .UnsubscribedAt.Valid}}<span class="status-pill archived">unsubscribed</span>{{end}}
+              {{if .BouncedAt.Valid}}<span class="status-pill failed">bounced</span>{{end}}
+            </td>
+            <td>{{.UpdatedAt.Format "2006-01-02"}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{end}}
+    </section>
+
+    <footer class="pagination">
+      {{if gt .Page 1}}
+      <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Previous</a>
+      {{end}}
+      <span>Page {{.Page}}</span>
+      {{if lt (multiply .Page .PageSize) .Total}}
+      <a href="{{.Path}}?page={{add .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Next</a>
+      {{end}}
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Customer · {{if .Customer.Name.Valid}}{{.Customer.Name.String}}{{else}}{{.Customer.Email.String}}{{end}}</title>
+  <link rel="stylesheet" href="{{.AdminPrefix}}/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <p class="eyebrow">ftd · CRM</p>
+        <h1>{{if .Customer.Name.Valid}}{{.Customer.Name.String}}{{else if .Customer.Email.Valid}}{{.Customer.Email.String}}{{else}}Customer{{end}}</h1>
+        <p class="lede">Customer #{{.Customer.ID}} · created {{.Customer.CreatedAt.Format "2006-01-02"}} · updated {{.Customer.UpdatedAt.Format "2006-01-02"}}
+          {{if .Customer.UnsubscribedAt.Valid}} <span class="status-pill archived">unsubscribed {{.Customer.UnsubscribedAt.Time.Format "2006-01-02"}}</span>{{end}}
+          {{if .Customer.BouncedAt.Valid}} <span class="status-pill failed">bounced {{.Customer.BouncedAt.Time.Format "2006-01-02"}}</span>{{end}}
+        </p>
+      </div>
+      <div class="actions">
+        <nav class="tabs">
+          <a href="{{.AdminPrefix}}/customers">← Customers</a>
+        </nav>
+        <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
+      </div>
+    </header>
+
+    {{with .Flash}}
+    <div class="alert {{.Kind}}">{{.Message}}</div>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Contact details</h2>
+        <p>Edit the record. Email must be unique across customers.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/update">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        <label>Name<input type="text" name="name" value="{{.Customer.Name.String}}"></label>
+        <label>Email<input type="email" name="email" value="{{.Customer.Email.String}}"></label>
+        <label>Company<input type="text" name="company" value="{{.Customer.Company.String}}"></label>
+        <label>Phone<input type="text" name="phone" value="{{.Customer.Phone.String}}"></label>
+        <label class="full">Address<input type="text" name="address" value="{{.Customer.Address.String}}"></label>
+        <label class="full">Notes<textarea name="notes" rows="4">{{.Customer.Notes.String}}</textarea></label>
+        <button type="submit">Save customer</button>
+      </form>
+    </section>
+
+    <section class="password-card">
+      <div>
+        <h2>Interest tags</h2>
+        <p>How this contact is classified. Sources: hand-set, declared by a submitted form, inherited from a clicked mailing link, or CSV import.</p>
+      </div>
+      <div>
+        <div class="chip-row">
+          {{range .TagChips}}
+          <span class="tag-chip src-{{.Source}}" title="source: {{.Source}}"><a href="{{$.AdminPrefix}}/customers?tag={{.Name}}">{{.Name}}</a>
+            <form method="post" action="{{$.AdminPrefix}}/customers/tag" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+              <input type="hidden" name="id" value="{{$.Customer.ID}}">
+              <input type="hidden" name="action" value="remove">
+              <input type="hidden" name="tag" value="{{.Name}}">
+              <button type="submit" class="chip-x" aria-label="Remove tag {{.Name}}">×</button>
+            </form>
+          </span>
+          {{else}}
+          <span class="hint">No tags yet.</span>
+          {{end}}
+        </div>
+        {{if .MemberOf}}
+        <div class="chip-row assoc-row">
+          <span class="assoc-label">Lists:</span>
+          {{range .MemberOf}}
+          <a class="assoc" href="{{$.AdminPrefix}}/lists/view?id={{.ID}}">{{.Name}}</a>
+          {{end}}
+        </div>
+        {{end}}
+        <form method="post" action="{{.AdminPrefix}}/customers/tag" class="chip-add">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="id" value="{{.Customer.ID}}">
+          <input type="hidden" name="action" value="add">
+          <input type="text" name="tag" list="all-tags" placeholder="add tag…" required>
+          <datalist id="all-tags">
+            {{range .AllTags}}<option value="{{.}}">{{end}}
+          </datalist>
+          <button type="submit">Add</button>
+        </form>
+      </div>
+    </section>
+
+    {{if .Customer.BouncedAt.Valid}}
+    <section class="password-card">
+      <div>
+        <h2>Bounced address</h2>
+        <p>A mailing to this address was permanently rejected (SMTP 5xx). Mailings skip it until the bounce is cleared.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/clear-bounce">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        <button type="submit">Clear bounce flag</button>
+      </form>
+    </section>
+    {{end}}
+
+    <section class="password-card">
+      <div>
+        <h2>Log activity</h2>
+        <p>Record a call, meeting, email, or note on this customer's timeline.</p>
+      </div>
+      <form method="post" action="{{.AdminPrefix}}/customers/note">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        <label>Kind
+          <select name="kind">
+            <option value="note">Note</option>
+            <option value="call">Call</option>
+            <option value="email">Email</option>
+            <option value="meeting">Meeting</option>
+          </select>
+        </label>
+        <label class="full">Details<textarea name="body" rows="3" required></textarea></label>
+        <button type="submit">Add to timeline</button>
+      </form>
+    </section>
+
+    {{if .Timeline}}
+    <section class="customers">
+      <h2>Timeline</h2>
+      <table class="table">
+        <thead><tr><th>When</th><th>Kind</th><th>Entry</th><th>By</th></tr></thead>
+        <tbody>
+          {{range .Timeline}}
+          <tr>
+            <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+            <td><span class="status-pill {{if eq .Kind "mailing"}}sent{{else}}new{{end}}">{{.Kind}}</span></td>
+            <td class="timeline-body">{{if .RefID.Valid}}<a href="{{$.AdminPrefix}}/mailings/view?id={{.RefID.Int64}}">{{.Body}}</a>{{else}}{{.Body}}{{end}}</td>
+            <td>{{.CreatedBy.String}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+
+    {{if .Clicks}}
+    <section class="customers">
+      <h2>Clicked links</h2>
+      <table class="table">
+        <thead><tr><th>Mailing</th><th>URL</th><th>Clicks</th><th>Last</th></tr></thead>
+        <tbody>
+          {{range .Clicks}}
+          <tr>
+            <td>{{.Subject}}</td>
+            <td class="file-ref">{{.URL}}</td>
+            <td>{{.Count}}</td>
+            <td>{{.LastAt.Format "2006-01-02 15:04"}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+
+    <section class="submissions">
+      <h2>Submission history ({{len .Submissions}})</h2>
+      {{if not .Submissions}}
+      <p>No submissions linked to this customer.</p>
+      {{else}}
+      {{range .Submissions}}
+      <div class="card {{.Status}}">
+        <div class="meta">
+          <div class="meta-top">
+            <span class="id-pill">#{{.ID}}</span>
+            <span class="status-pill {{.Status}}">{{.Status}}</span>
+          </div>
+          <div class="meta-bottom">
+            <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
+            <div><strong>Source IP</strong><span>{{.IP.String}}</span></div>
+            {{if .FilePath.Valid}}
+            <div><strong>Uploaded File</strong><span class="file-ref">{{.FilePath.String}}</span></div>
+            {{end}}
+          </div>
+        </div>
+        {{if .Fields}}
+        <dl class="fields">
+          {{range .Fields}}
+          <div class="field-row"><dt>{{.Key}}</dt><dd>{{.Value}}</dd></div>
+          {{end}}
+        </dl>
+        {{end}}
+        {{if .Comment.Valid}}<p class="hint">Note: {{.Comment.String}}</p>{{end}}
+      </div>
+      {{end}}
+      {{end}}
+    </section>
+  </div>
+</body>
+</html>
