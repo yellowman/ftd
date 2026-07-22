@@ -160,6 +160,7 @@ development and one-off runs.
 | --- | --- | --- |
 | `database_url` | PostgreSQL connection string. Add `?sslmode=disable` for a local non-TLS server; use `sslmode=require`/`verify-full` for remote ones. | **Required** |
 | `fastcgi_socket` | Unix socket path for the FastCGI listener (ignored with `-tcp`). | `/var/www/run/ftd.sock` |
+| `socket_group` | Group given ownership of the FastCGI socket (root:group, mode 0660) before privileges drop, so the web server can connect. `www-data` on Debian-style Linux. Missing group → mode 0666 fallback. | `www` |
 | `form_path` | Submission endpoint path. | `/form` |
 | `admin_prefix` | Admin dashboard path prefix. | `/form/admin` |
 | `track_path` | Public tracking endpoints prefix (`/open`, `/c`, `/unsub`, `/img`). | `/form/t` |
@@ -174,6 +175,7 @@ development and one-off runs.
 | `public_base_url` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
 | `reply_to` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
 | `reply_lmtp_socket` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
+| `reply_lmtp_group` | Group given ownership of the LMTP socket (root:group, mode 0660) so the MTA can connect — `_postfix`/`postfix`. Unset → mode 0666, directory permissions gate access. | Not set |
 
 Flags: `-tcp <port>` listens on TCP instead of the Unix socket;
 `-c <path>` (or `-config <path>`) selects the configuration file; `-deliver`
@@ -270,8 +272,8 @@ sales@example.com  lmtp:unix:/var/www/run/ftd-lmtp.sock
 Run `postmap /etc/postfix/transport && postfix reload`. If your `master.cf`
 runs the `lmtp` agent chrooted (Debian default), either set its chroot column
 to `n` or place the socket under `/var/spool/postfix/` and adjust the path.
-ftd creates the socket mode 0660 — make it connectable by Postfix (e.g.
-`chgrp postfix` on the socket or run the socket directory group-shared).
+Set `reply_lmtp_group` (`_postfix` on OpenBSD, `postfix` on Linux) and ftd
+makes the socket root:group mode 0660 itself before dropping privileges.
 
 *Pipe helper (simplest — Postfix invokes ftd per message):*
 

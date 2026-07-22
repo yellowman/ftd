@@ -279,7 +279,12 @@ func main() {
 		log.Fatalf("failed to check admin password: %v", err)
 	}
 
-	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort)
+	socketGroup := os.Getenv("SOCKET_GROUP")
+	if socketGroup == "" {
+		socketGroup = "www"
+	}
+
+	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort, socketGroup)
 	if err != nil {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
 	}
@@ -294,8 +299,8 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to prepare LMTP listener: %v", err)
 		}
-		if err := os.Chmod(lmtpSock, 0660); err != nil {
-			log.Printf("lmtp socket chmod: %v", err)
+		if err := secureSocket(lmtpSock, os.Getenv("REPLY_LMTP_GROUP")); err != nil {
+			log.Printf("lmtp socket permissions: %v", err)
 		}
 	}
 
@@ -478,7 +483,7 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	return nil
 }
 
-func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, error) {
+func prepareFastCGIListener(path string, tcpPort int, socketGroup string) (net.Listener, string, error) {
 	if tcpPort > 0 {
 		l, err := net.Listen("tcp", fmt.Sprintf(":%d", tcpPort))
 		if err != nil {
@@ -492,16 +497,34 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 	if err != nil {
 		return nil, "", fmt.Errorf("listen unix: %w", err)
 	}
-	// Connecting to a unix socket requires write permission, and the web
-	// server runs as its own user (www/www-data) — with the default 0755 the
-	// daemon works but httpd gets ECONNREFUSED-ish failures and serves 500s.
-	// 0666 is safe here because the socket directory (/var/www/run, 750
-	// _ftd:www per the README) is what gates access.
-	if err := os.Chmod(path, 0666); err != nil {
+	if err := secureSocket(path, socketGroup); err != nil {
 		l.Close()
-		return nil, "", fmt.Errorf("chmod socket: %w", err)
+		return nil, "", fmt.Errorf("socket permissions: %w", err)
 	}
 	return l, fmt.Sprintf("unix %s", path), nil
+}
+
+// secureSocket sets ownership and permissions on a just-created unix socket,
+// while the daemon still runs as root (before chroot/privilege drop).
+// Connecting to a unix socket requires write permission and the peer daemon
+// runs as its own user, so with a group configured the socket becomes
+// root:<group> mode 0660. If no group is configured, the group is missing on
+// this system, or chown is not permitted (unprivileged development runs), it
+// falls back to 0666 and the socket directory's permissions gate access.
+func secureSocket(path, group string) error {
+	if group != "" {
+		grp, err := user.LookupGroup(group)
+		if err != nil {
+			log.Printf("socket %s: group %q not found; falling back to mode 0666", path, group)
+		} else if gid, err := strconv.Atoi(grp.Gid); err == nil {
+			if err := os.Chown(path, -1, gid); err != nil {
+				log.Printf("socket %s: chown :%s: %v; falling back to mode 0666", path, group, err)
+			} else {
+				return os.Chmod(path, 0660)
+			}
+		}
+	}
+	return os.Chmod(path, 0666)
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
