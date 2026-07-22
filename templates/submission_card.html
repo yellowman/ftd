@@ -1,0 +1,64 @@
+{{/* One submission card. Data: .S (Submission), .CSRFToken, .AdminPrefix.
+     Rendered inline by dashboard.html and as a fragment by the live-update
+     poll endpoint, so the two stay pixel-identical. */}}
+<div class="card {{.S.Status}}" data-submission-id="{{.S.ID}}">
+  <div class="meta">
+    <div class="meta-top">
+      <span class="id-pill">#{{.S.ID}}</span>
+      <span class="meta-top-links">
+        {{if .S.CustomerID.Valid}}
+        <a class="assoc" href="{{.AdminPrefix}}/customers/view?id={{.S.CustomerID.Int64}}">&#9679; {{if .S.CustomerName.String}}{{.S.CustomerName.String}}{{else}}{{.S.CustomerEmail.String}}{{end}}</a>
+        {{end}}
+        <span class="status-pill {{.S.Status}}">{{.S.Status}}</span>
+      </span>
+    </div>
+    <div class="meta-bottom">
+      <div><strong>submitted</strong><span>{{.S.SubmittedAt.Format "2006-01-02 15:04:05"}}</span></div>
+      <div><strong>ip</strong><span>{{.S.IP.String}}</span></div>
+      {{if .S.ForwardedFor.String}}
+      <div><strong>x-forwarded-for</strong><span title="Client-supplied header; may be spoofed">{{.S.ForwardedFor.String}}</span></div>
+      {{end}}
+      {{if .S.UserAgent.String}}
+      <div><strong>ua</strong><span>{{.S.UserAgent.String}}</span></div>
+      {{end}}
+      {{if .S.Referer.String}}
+      <div><strong>referer</strong><span>{{.S.Referer.String}}</span></div>
+      {{end}}
+      {{if .S.FilePath.Valid}}
+      <div><strong>file</strong><span class="file-ref">{{.S.FilePath.String}}</span></div>
+      {{end}}
+    </div>
+  </div>
+  {{if .S.Fields}}
+  <dl class="fields">
+    {{range .S.Fields}}
+    <div class="field-row">
+      <dt>{{.Key}}</dt>
+      <dd>{{.Value}}</dd>
+    </div>
+    {{end}}
+  </dl>
+  {{else}}
+  {{/* Raw payload only when nothing decoded — otherwise it's just noise. */}}
+  <pre class="json">{{.S.FormPretty}}</pre>
+  {{end}}
+  <form method="post" class="status-form" action="{{.AdminPrefix}}/">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="id" value="{{.S.ID}}">
+    <div class="comment-block {{if eq .S.Status "archived"}}archived{{end}}">
+      <label>Comment
+        <textarea name="comment" rows="1" {{if eq .S.Status "archived"}}readonly aria-readonly="true"{{end}}>{{.S.Comment.String}}</textarea>
+      </label>
+      <p class="hint">Notes for reviewers; archived items show comments in a muted state.</p>
+    </div>
+    <label>Update status
+      <select name="status">
+        <option value="new" {{if eq .S.Status "new"}}selected{{end}}>New</option>
+        <option value="in_progress" {{if eq .S.Status "in_progress"}}selected{{end}}>In Progress</option>
+        <option value="complete" {{if eq .S.Status "complete"}}selected{{end}}>Complete</option>
+        <option value="archived" {{if eq .S.Status "archived"}}selected{{end}}>Archived</option>
+      </select>
+    </label>
+    <button type="submit">Save</button>
+  </form>
+</div>

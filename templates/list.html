@@ -15,7 +15,13 @@
       </div>
       <div class="actions">
         <nav class="tabs">
-          <a href="{{.AdminPrefix}}/lists">← Lists</a>
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
+          <a href="{{.AdminPrefix}}/customers">Customers</a>
+          <a href="{{.AdminPrefix}}/tags">Tags</a>
+          <a href="{{.AdminPrefix}}/lists" class="active">Lists</a>
+          <a href="{{.AdminPrefix}}/mailings">Mailings</a>
+          <a href="{{.AdminPrefix}}/users">Users</a>
         </nav>
         <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
       </div>

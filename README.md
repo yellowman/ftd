@@ -8,7 +8,7 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 ## Features
 
 - Accepts arbitrary form fields (stored as JSONB) plus request metadata; optional single file upload.
-- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
+- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), live updates (new submissions appear without a reload), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
 - Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
 - Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
@@ -160,7 +160,7 @@ development and one-off runs.
 | --- | --- | --- |
 | `database_url` | PostgreSQL connection string. Add `?sslmode=disable` for a local non-TLS server; use `sslmode=require`/`verify-full` for remote ones. | **Required** |
 | `fastcgi_socket` | Unix socket path for the FastCGI listener (ignored with `-tcp`). | `/var/www/run/ftd.sock` |
-| `socket_group` | Group given ownership of the FastCGI socket (root:group, mode 0660) before privileges drop, so the web server can connect. `www-data` on Debian-style Linux. Missing group → mode 0666 fallback. | `www` |
+| `socket_user` / `socket_group` | Owner of the FastCGI socket (user:group, mode 0660), applied before privileges drop so the web server can connect. `www-data` on Debian-style Linux. Unresolvable names → mode 0666 fallback. | `www` / `www` |
 | `form_path` | Submission endpoint path. | `/form` |
 | `admin_prefix` | Admin dashboard path prefix. | `/form/admin` |
 | `track_path` | Public tracking endpoints prefix (`/open`, `/c`, `/unsub`, `/img`). | `/form/t` |
@@ -175,7 +175,7 @@ development and one-off runs.
 | `public_base_url` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
 | `reply_to` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
 | `reply_lmtp_socket` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
-| `reply_lmtp_group` | Group given ownership of the LMTP socket (root:group, mode 0660) so the MTA can connect — `_postfix`/`postfix`. Unset → mode 0666, directory permissions gate access. | Not set |
+| `reply_lmtp_user` / `reply_lmtp_group` | Owner of the LMTP socket (user:group, mode 0660) so the MTA's delivery agent — a different user than the web server — can connect. `postfix` on Linux. Unresolvable names → mode 0666 fallback. | `_postfix` / `_postfix` |
 
 Flags: `-tcp <port>` listens on TCP instead of the Unix socket;
 `-c <path>` (or `-config <path>`) selects the configuration file; `-deliver`
@@ -272,8 +272,10 @@ sales@example.com  lmtp:unix:/var/www/run/ftd-lmtp.sock
 Run `postmap /etc/postfix/transport && postfix reload`. If your `master.cf`
 runs the `lmtp` agent chrooted (Debian default), either set its chroot column
 to `n` or place the socket under `/var/spool/postfix/` and adjust the path.
-Set `reply_lmtp_group` (`_postfix` on OpenBSD, `postfix` on Linux) and ftd
-makes the socket root:group mode 0660 itself before dropping privileges.
+Set `reply_lmtp_user` / `reply_lmtp_group` (default `_postfix` as on OpenBSD;
+`postfix` on Linux) and ftd chowns the socket user:group mode 0660 itself
+before dropping privileges — a separate owner from the web-facing FastCGI
+socket, since the MTA and the web server run as different users.
 
 *Pipe helper (simplest — Postfix invokes ftd per message):*
 

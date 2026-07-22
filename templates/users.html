@@ -16,6 +16,7 @@
       <div class="actions">
         <nav class="tabs">
           <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
           <a href="{{.AdminPrefix}}/customers">Customers</a>
           <a href="{{.AdminPrefix}}/tags">Tags</a>
           <a href="{{.AdminPrefix}}/lists">Lists</a>
@@ -29,21 +30,6 @@
     {{with .Flash}}
     <div class="alert {{.Kind}}">{{.Message}}</div>
     {{end}}
-
-    <section class="password-card">
-      <div>
-        <h2>Add user</h2>
-        <p>Usernames are lowercase (letters, digits, _ . -). Passwords need at least 8 characters.</p>
-      </div>
-      <form method="post" action="{{.AdminPrefix}}/users">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="action" value="add">
-        <label>Username<input type="text" name="username" required autocomplete="off"></label>
-        <label>Password<input type="password" name="password" required autocomplete="new-password"></label>
-        <label>Confirm<input type="password" name="confirm" required autocomplete="new-password"></label>
-        <button type="submit">Add user</button>
-      </form>
-    </section>
 
     <section class="customers">
       <table class="table">
@@ -68,6 +54,24 @@
         </tbody>
       </table>
     </section>
+
+    <details class="tools">
+      <summary>Add user</summary>
+      <section class="password-card">
+        <div>
+          <h2>Add user</h2>
+          <p>Usernames are lowercase (letters, digits, _ . -). Passwords need at least 8 characters.</p>
+        </div>
+        <form method="post" action="{{.AdminPrefix}}/users">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="add">
+          <label>Username<input type="text" name="username" required autocomplete="off"></label>
+          <label>Password<input type="password" name="password" required autocomplete="new-password"></label>
+          <label>Confirm<input type="password" name="confirm" required autocomplete="new-password"></label>
+          <button type="submit">Add user</button>
+        </form>
+      </section>
+    </details>
   </div>
 </body>
 </html>

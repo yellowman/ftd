@@ -279,12 +279,18 @@ func main() {
 		log.Fatalf("failed to check admin password: %v", err)
 	}
 
+	// The web server and the MTA run as different users, so each socket has
+	// its own owner settings.
+	socketUser := os.Getenv("SOCKET_USER")
+	if socketUser == "" {
+		socketUser = "www"
+	}
 	socketGroup := os.Getenv("SOCKET_GROUP")
 	if socketGroup == "" {
 		socketGroup = "www"
 	}
 
-	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort, socketGroup)
+	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort, socketUser, socketGroup)
 	if err != nil {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
 	}
@@ -299,7 +305,15 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to prepare LMTP listener: %v", err)
 		}
-		if err := secureSocket(lmtpSock, os.Getenv("REPLY_LMTP_GROUP")); err != nil {
+		lmtpUser := os.Getenv("REPLY_LMTP_USER")
+		if lmtpUser == "" {
+			lmtpUser = "_postfix"
+		}
+		lmtpGroup := os.Getenv("REPLY_LMTP_GROUP")
+		if lmtpGroup == "" {
+			lmtpGroup = "_postfix"
+		}
+		if err := secureSocket(lmtpSock, lmtpUser, lmtpGroup); err != nil {
 			log.Printf("lmtp socket permissions: %v", err)
 		}
 	}
@@ -483,7 +497,7 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	return nil
 }
 
-func prepareFastCGIListener(path string, tcpPort int, socketGroup string) (net.Listener, string, error) {
+func prepareFastCGIListener(path string, tcpPort int, socketUser, socketGroup string) (net.Listener, string, error) {
 	if tcpPort > 0 {
 		l, err := net.Listen("tcp", fmt.Sprintf(":%d", tcpPort))
 		if err != nil {
@@ -497,7 +511,7 @@ func prepareFastCGIListener(path string, tcpPort int, socketGroup string) (net.L
 	if err != nil {
 		return nil, "", fmt.Errorf("listen unix: %w", err)
 	}
-	if err := secureSocket(path, socketGroup); err != nil {
+	if err := secureSocket(path, socketUser, socketGroup); err != nil {
 		l.Close()
 		return nil, "", fmt.Errorf("socket permissions: %w", err)
 	}
@@ -506,25 +520,37 @@ func prepareFastCGIListener(path string, tcpPort int, socketGroup string) (net.L
 
 // secureSocket sets ownership and permissions on a just-created unix socket,
 // while the daemon still runs as root (before chroot/privilege drop).
-// Connecting to a unix socket requires write permission and the peer daemon
-// runs as its own user, so with a group configured the socket becomes
-// root:<group> mode 0660. If no group is configured, the group is missing on
-// this system, or chown is not permitted (unprivileged development runs), it
-// falls back to 0666 and the socket directory's permissions gate access.
-func secureSocket(path, group string) error {
-	if group != "" {
-		grp, err := user.LookupGroup(group)
-		if err != nil {
-			log.Printf("socket %s: group %q not found; falling back to mode 0666", path, group)
-		} else if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			if err := os.Chown(path, -1, gid); err != nil {
-				log.Printf("socket %s: chown :%s: %v; falling back to mode 0666", path, group, err)
-			} else {
-				return os.Chmod(path, 0660)
-			}
+// Connecting to a unix socket requires write permission, so each socket is
+// chowned to its peer daemon's user and group — the web server (www) for the
+// FastCGI socket, the MTA's delivery user (_postfix) for the LMTP socket —
+// with mode 0660. Names that don't resolve on this system, or a chown that
+// isn't permitted (unprivileged development runs), fall back to mode 0666
+// with the socket directory's permissions gating access.
+func secureSocket(path, owner, group string) error {
+	uid, gid := -1, -1
+	if owner != "" {
+		if u, err := user.Lookup(owner); err != nil {
+			log.Printf("socket %s: user %q not found", path, owner)
+		} else if n, err := strconv.Atoi(u.Uid); err == nil {
+			uid = n
 		}
 	}
-	return os.Chmod(path, 0666)
+	if group != "" {
+		if g, err := user.LookupGroup(group); err != nil {
+			log.Printf("socket %s: group %q not found", path, group)
+		} else if n, err := strconv.Atoi(g.Gid); err == nil {
+			gid = n
+		}
+	}
+	if uid == -1 && gid == -1 {
+		log.Printf("socket %s: no resolvable owner; falling back to mode 0666", path)
+		return os.Chmod(path, 0666)
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		log.Printf("socket %s: chown %s:%s: %v; falling back to mode 0666", path, owner, group, err)
+		return os.Chmod(path, 0666)
+	}
+	return os.Chmod(path, 0660)
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
@@ -600,6 +626,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/preview"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingPreview))))
 	mux.Handle(s.adminPath("/mailings/retry"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingRetry))))
 	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
+	mux.Handle(s.adminPath("/poll"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handlePoll))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
@@ -1378,6 +1405,17 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 
 	flash := mapPasswordFlash(r.URL.Query().Get("pw"))
 
+	// Live-update cursor: the highest submission id in the whole table (not
+	// just the filtered page), so the poll endpoint only ever surfaces
+	// genuinely new arrivals. Live updates run on page 1 only; deeper pages
+	// are a historical view.
+	var latestID int64
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COALESCE(MAX(id), 0) FROM submissions").Scan(&latestID); err != nil {
+		log.Printf("latest submission id error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	data := map[string]interface{}{
 		"Submissions":     submissions,
 		"Page":            page,
@@ -1390,9 +1428,74 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		"AdminPrefix":     s.adminPrefix,
 		"DefaultPassword": s.defaultPasswordActive,
 		"PasswordFlash":   flash,
+		"LivePoll":        page == 1,
+		"LatestID":        latestID,
 	}
 
 	renderTemplate(w, "templates/dashboard.html", data)
+}
+
+// handlePoll serves the dashboard's live-update loop: submissions with id
+// beyond the caller's cursor come back as server-rendered card fragments
+// (same partial the dashboard uses) wrapped in JSON, newest first.
+func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	after, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	if err != nil || after < 0 {
+		http.Error(w, "invalid cursor", http.StatusBadRequest)
+		return
+	}
+
+	statusFilter := r.URL.Query().Get("status")
+	if statusFilter != "" && (statusFilter == "archived" || !isValidStatus(statusFilter)) {
+		http.Error(w, "invalid status filter", http.StatusBadRequest)
+		return
+	}
+
+	submissions, err := s.listSubmissionsAfter(r.Context(), after, statusFilter, defaultItemsPerPage)
+	if err != nil {
+		log.Printf("poll submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	latest := after
+	var buf bytes.Buffer
+	if len(submissions) > 0 {
+		tpl, err := template.New("submission_card.html").Funcs(templateFuncs()).ParseFS(embeddedFS, submissionCardTemplate)
+		if err != nil {
+			http.Error(w, "template not found", http.StatusInternalServerError)
+			return
+		}
+		for _, sub := range submissions {
+			if sub.ID > latest {
+				latest = sub.ID
+			}
+			card := map[string]interface{}{
+				"S":           sub,
+				"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+				"AdminPrefix": s.adminPrefix,
+			}
+			if err := tpl.Execute(&buf, card); err != nil {
+				log.Printf("poll card render error: %v", err)
+				http.Error(w, "template error", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"latest": latest,
+		"html":   buf.String(),
+	}); err != nil {
+		log.Printf("poll encode error: %v", err)
+	}
 }
 
 func (s *server) handleArchived(w http.ResponseWriter, r *http.Request) {
@@ -1589,6 +1692,43 @@ func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
+}
+
+// listSubmissionsAfter returns up to limit submissions with id > after,
+// newest first, honoring the dashboard's status filter (archived is always
+// excluded — the live view never shows archived items).
+func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status string, limit int) ([]Submission, error) {
+	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, c.name, c.email
+	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id
+	    WHERE sub.id > $1`
+	args := []interface{}{after}
+	if status != "" {
+		query += " AND sub.status = $2"
+		args = append(args, status)
+	} else {
+		query += " AND sub.status <> 'archived'"
+	}
+	query += " ORDER BY sub.id DESC LIMIT $" + strconv.Itoa(len(args)+1)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	submissions := []Submission{}
+	for rows.Next() {
+		var sub Submission
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.CustomerName, &sub.CustomerEmail); err != nil {
+			return nil, err
+		}
+		sub.FormPretty = formatJSON(sub.FormData)
+		sub.Fields = extractFields(sub.FormData)
+		submissions = append(submissions, sub)
+	}
+	return submissions, rows.Err()
 }
 
 func (s *server) listSubmissions(ctx context.Context, status string, page, pageSize int, excludeArchived bool) ([]Submission, int, error) {
@@ -2158,18 +2298,38 @@ func (s *server) adminPath(suffix string) string {
 	return s.adminPrefix + "/" + suffix
 }
 
-func renderTemplate(w http.ResponseWriter, path string, data interface{}) {
-	funcMap := template.FuncMap{
+// submissionCardTemplate is the shared partial for one submission card,
+// rendered inline by the dashboard and as a fragment by the live-update poll
+// endpoint.
+const submissionCardTemplate = "templates/submission_card.html"
+
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
 		"add":      func(a, b int) int { return a + b },
 		"subtract": func(a, b int) int { return a - b },
 		"multiply": func(a, b int) int { return a * b },
+		// cardCtx bundles one submission with the page-level values the card
+		// partial needs ({{template}} can only pass a single argument).
+		"cardCtx": func(sub Submission, root map[string]interface{}) map[string]interface{} {
+			return map[string]interface{}{
+				"S":           sub,
+				"CSRFToken":   root["CSRFToken"],
+				"AdminPrefix": root["AdminPrefix"],
+			}
+		},
 	}
+}
 
+func renderTemplate(w http.ResponseWriter, path string, data interface{}) {
 	// Name the template after the file's base name so that ParseFS associates the
 	// parsed content with this template (ParseFS names templates by base name).
 	// Otherwise Execute would run an empty template and fail.
 	name := filepath.Base(path)
-	tpl, err := template.New(name).Funcs(funcMap).ParseFS(embeddedFS, path)
+	patterns := []string{path}
+	if path != submissionCardTemplate {
+		patterns = append(patterns, submissionCardTemplate)
+	}
+	tpl, err := template.New(name).Funcs(templateFuncs()).ParseFS(embeddedFS, patterns...)
 	if err != nil {
 		http.Error(w, "template not found", http.StatusInternalServerError)
 		return
