@@ -2367,13 +2367,16 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 
 	// ?re=<submission id> arrives from a card's reply chip: thread the
 	// composed message under that received message and prefill the subject.
+	// Inbound email replies carry their title in _reply_subject; form posts
+	// may have a plain subject field.
 	var reID int64
 	var reSubject string
 	if reStr := r.URL.Query().Get("re"); reStr != "" {
 		if n, err := strconv.ParseInt(reStr, 10, 64); err == nil && n > 0 {
 			var subj sql.NullString
 			if err := s.db.QueryRowContext(r.Context(),
-				"SELECT form_data->>'subject' FROM submissions WHERE id=$1 AND customer_id=$2",
+				`SELECT COALESCE(NULLIF(form_data->>'_reply_subject', ''), form_data->>'subject')
+				 FROM submissions WHERE id=$1 AND customer_id=$2`,
 				n, id).Scan(&subj); err == nil {
 				reID = n
 				if t := strings.TrimSpace(subj.String); t != "" {
