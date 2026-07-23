@@ -634,6 +634,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
 	mux.Handle(s.adminPath("/poll"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handlePoll))))
 	mux.Handle(s.adminPath("/delete-invalid"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteInvalid))))
+	mux.Handle(s.adminPath("/delete"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteSubmission))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
@@ -1553,13 +1554,7 @@ func (s *server) handleDeleteInvalid(w http.ResponseWriter, r *http.Request) {
 		for id := range customerSet {
 			ids = append(ids, id)
 		}
-		if _, err := tx.ExecContext(r.Context(),
-			`DELETE FROM customers c WHERE c.id = ANY($1)
-			   AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.customer_id = c.id)
-			   AND NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.customer_id = c.id)
-			   AND NOT EXISTS (SELECT 1 FROM mailing_recipients mr WHERE mr.customer_id = c.id)`,
-			pq.Array(ids),
-		); err != nil {
+		if err := pruneOrphanCustomers(r.Context(), tx, ids); err != nil {
 			log.Printf("delete invalid customers error: %v", err)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
@@ -1573,6 +1568,85 @@ func (s *server) handleDeleteInvalid(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, s.adminPath("/?cleaned="+strconv.Itoa(deleted)), http.StatusSeeOther)
+}
+
+// pruneOrphanCustomers removes customers (from the given candidates) that
+// exist only because of submissions just deleted in this transaction: no
+// remaining submissions, no list memberships, no mailing history, and no
+// timeline activity (notes, calls, sent emails). A customer with any real
+// footprint survives.
+func pruneOrphanCustomers(ctx context.Context, tx *sql.Tx, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`DELETE FROM customers c WHERE c.id = ANY($1)
+		   AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM mailing_recipients mr WHERE mr.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM activities a WHERE a.customer_id = c.id)`,
+		pq.Array(ids))
+	return err
+}
+
+// handleDeleteSubmission hard-deletes one submission (test entries, junk) —
+// unlike archiving, the row is gone. The linked customer is pruned too when
+// the deleted submission was the only reason it existed.
+func (s *server) handleDeleteSubmission(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("delete submission begin error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	var customerID sql.NullInt64
+	err = tx.QueryRowContext(r.Context(),
+		"DELETE FROM submissions WHERE id=$1 RETURNING customer_id", id).Scan(&customerID)
+	if err == sql.ErrNoRows {
+		// Already gone (double click, another admin): nothing to do.
+		http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
+		return
+	} else if err != nil {
+		log.Printf("delete submission error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if customerID.Valid {
+		if err := pruneOrphanCustomers(r.Context(), tx, []int64{customerID.Int64}); err != nil {
+			log.Printf("delete submission customer prune error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("delete submission commit error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
 }
 
 // handlePoll serves the dashboard's live-update loop: submissions with id

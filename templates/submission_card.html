@@ -44,23 +44,30 @@
   {{/* Raw payload only when nothing decoded — otherwise it's just noise. */}}
   <pre class="json">{{.S.FormPretty}}</pre>
   {{end}}
-  <form method="post" class="status-form" action="{{.AdminPrefix}}/">
-    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-    <input type="hidden" name="id" value="{{.S.ID}}">
-    <div class="comment-block {{if eq .S.Status "archived"}}archived{{end}}">
-      <label>Comment
-        <textarea name="comment" rows="1" {{if eq .S.Status "archived"}}readonly aria-readonly="true"{{end}}>{{.S.Comment.String}}</textarea>
+  <div class="card-actions">
+    <form method="post" class="status-form" action="{{.AdminPrefix}}/">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <input type="hidden" name="id" value="{{.S.ID}}">
+      <div class="comment-block {{if eq .S.Status "archived"}}archived{{end}}">
+        <label>Comment
+          <textarea name="comment" rows="1" {{if eq .S.Status "archived"}}readonly aria-readonly="true"{{end}}>{{.S.Comment.String}}</textarea>
+        </label>
+        <p class="hint">Notes for reviewers; archived items show comments in a muted state.</p>
+      </div>
+      <label>Update status
+        <select name="status">
+          <option value="new" {{if eq .S.Status "new"}}selected{{end}}>New</option>
+          <option value="in_progress" {{if eq .S.Status "in_progress"}}selected{{end}}>In Progress</option>
+          <option value="complete" {{if eq .S.Status "complete"}}selected{{end}}>Complete</option>
+          <option value="archived" {{if eq .S.Status "archived"}}selected{{end}}>Archived</option>
+        </select>
       </label>
-      <p class="hint">Notes for reviewers; archived items show comments in a muted state.</p>
-    </div>
-    <label>Update status
-      <select name="status">
-        <option value="new" {{if eq .S.Status "new"}}selected{{end}}>New</option>
-        <option value="in_progress" {{if eq .S.Status "in_progress"}}selected{{end}}>In Progress</option>
-        <option value="complete" {{if eq .S.Status "complete"}}selected{{end}}>Complete</option>
-        <option value="archived" {{if eq .S.Status "archived"}}selected{{end}}>Archived</option>
-      </select>
-    </label>
-    <button type="submit">Save</button>
-  </form>
+      <button type="submit">Save</button>
+    </form>
+    <form method="post" action="{{.AdminPrefix}}/delete" class="delete-submission" data-id="{{.S.ID}}">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <input type="hidden" name="id" value="{{.S.ID}}">
+      <button type="submit" class="danger" title="Permanently delete this entry (unlike archiving)">Delete</button>
+    </form>
+  </div>
 </div>

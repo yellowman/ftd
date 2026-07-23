@@ -519,7 +519,17 @@ pre.json {
 
 .pagination a:hover { border-color: var(--accent-dim); }
 
-/* One compact row: comment grows, status + save sit at the right edge. */
+/* One compact row: comment grows, status + save + delete at the right edge. */
+.card-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+}
+
+.card-actions .status-form { flex: 1; }
+
+.delete-submission { margin: 0 0 0.15rem; }
+
 .status-form {
   margin-top: 0.5rem;
   display: flex;

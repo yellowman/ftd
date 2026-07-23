@@ -8,7 +8,7 @@ PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 ## Features
 
 - Accepts arbitrary form fields (stored as JSONB) plus request metadata; optional single file upload.
-- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), live updates (new submissions appear without a reload), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
+- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), live updates (new submissions appear without a reload), reviewer comments, per-card hard delete for test/junk entries (also removes a customer record that existed only because of that entry), multi-user accounts, CSRF/secure-cookie/security-header hardening.
 - Email deliverability check at intake: DNS MX/A lookup on the submitted address's domain; unresolvable addresses are captured but flagged, the submitting site gets a warning to show the visitor, and flagged entries can be bulk-deleted from the dashboard.
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
 - Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
