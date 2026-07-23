@@ -144,6 +144,25 @@ CREATE TABLE IF NOT EXISTS activities (
 
 CREATE INDEX IF NOT EXISTS activities_customer_idx ON activities (customer_id, created_at DESC);
 
+-- Full record of operator-composed emails (the customer-page Send email
+-- composer). submission_id links a reply to the received message it answers;
+-- SET NULL keeps the sent record as plain outgoing mail if that submission
+-- is later deleted.
+CREATE TABLE IF NOT EXISTS sent_emails (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER REFERENCES customers (id) ON DELETE CASCADE,
+    submission_id INTEGER REFERENCES submissions (id) ON DELETE SET NULL,
+    to_email TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body_html TEXT NOT NULL,
+    body_text TEXT NOT NULL,
+    sent_by TEXT,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS sent_emails_customer_idx ON sent_emails (customer_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS sent_emails_submission_idx ON sent_emails (submission_id);
+
 -- Reply ingestion idempotency: the MTA retries deliveries after a lost
 -- acknowledgment, so replies are deduplicated on their Message-ID (or a
 -- content hash when absent). Deduplicates first so upgrades of databases

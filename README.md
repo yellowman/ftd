@@ -275,16 +275,30 @@ mailable again. Each customer page has the editable profile, an
 activity timeline (notes/calls/emails/meetings + automatic mailing history),
 and their submissions.
 
-**Direct replies** — every customer page has a Send email composer (the same
-WYSIWYG editor as mailings). It sends one personal message through the
-configured SMTP relay: no tracking links, no open pixel, no unsubscribe
-footer, no bulletproof table wrapper — just `multipart/alternative` with an
-auto-generated plain-text version. The send is logged on the activity
-timeline (subject + text excerpt, attributed to the logged-in admin), and
-the `reply_to` address routes the customer's answer back into the inbox.
-Suppression flags don't block it: unsubscribed means "no marketing", not
-"no correspondence". Submission cards in the inbox link straight to it via
-their ✉ reply chip.
+**Direct replies & the sent-mail record** — every customer page has a Send
+email composer (the same WYSIWYG editor as mailings). It sends one personal
+message through the configured SMTP relay: no tracking links, no open pixel,
+no unsubscribe footer, no bulletproof table wrapper — just
+`multipart/alternative` with an auto-generated plain-text version. Every
+sent message is stored in full and kept visible in three places:
+
+- *Threaded under the received message.* Reach the composer through a card's
+  ✉ reply chip and the sent reply attaches beneath that submission in the
+  inbox (expandable, with sender and timestamp) — the conversation reads in
+  place. The chip prefills the subject (`Re: …`) when the received message
+  had one.
+- *Outgoing email* on the customer page lists all of their sent messages,
+  newest first, each expandable to the full text and linking back to the
+  submission it answered (a message composed without a reply context shows
+  as plain outgoing mail).
+- The activity timeline logs each send inline with everything else.
+
+`reply_to` routes the customer's answer back into the inbox, so the loop is
+form → inbox → reply → their answer, all recorded. Suppression flags don't
+block direct replies: unsubscribed means "no marketing", not "no
+correspondence". This is deliberately record-keeping, not a mail client —
+if a conversation outgrows it, move that thread to your regular mailer; the
+record of what was sent stays here.
 
 **Tags** — the interest system. Tags live in a normalized vocabulary
 (lowercase; manage it on the Tags page) and attach to customers with a

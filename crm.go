@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // ---- Users -----------------------------------------------------------------
@@ -1473,9 +1475,76 @@ func (s *server) buildDirectMessage(to, subject, htmlBody string) []byte {
 	return buf.Bytes()
 }
 
+// SentEmail is one operator-composed message, stored in full so the CRM
+// keeps a usable record of outgoing correspondence.
+type SentEmail struct {
+	ID           int64
+	CustomerID   sql.NullInt64
+	SubmissionID sql.NullInt64
+	ToEmail      string
+	Subject      string
+	BodyHTML     string
+	BodyText     string
+	SentBy       sql.NullString
+	SentAt       time.Time
+}
+
+// attachSentReplies loads the sent emails that answer the given submissions
+// and attaches each to its submission, oldest first — the inbox shows the
+// thread under the received message.
+func (s *server) attachSentReplies(ctx context.Context, subs []Submission) error {
+	if len(subs) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(subs))
+	byID := make(map[int64]*Submission, len(subs))
+	for i := range subs {
+		ids[i] = subs[i].ID
+		byID[subs[i].ID] = &subs[i]
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, submission_id, to_email, subject, body_text, sent_by, sent_at
+		 FROM sent_emails WHERE submission_id = ANY($1) ORDER BY sent_at ASC`,
+		pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e SentEmail
+		if err := rows.Scan(&e.ID, &e.SubmissionID, &e.ToEmail, &e.Subject, &e.BodyText, &e.SentBy, &e.SentAt); err != nil {
+			return err
+		}
+		if sub := byID[e.SubmissionID.Int64]; sub != nil {
+			sub.SentReplies = append(sub.SentReplies, e)
+		}
+	}
+	return rows.Err()
+}
+
+// customerSentEmails lists a customer's outgoing messages, newest first.
+func (s *server) customerSentEmails(ctx context.Context, customerID int64) ([]SentEmail, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, submission_id, to_email, subject, body_text, sent_by, sent_at
+		 FROM sent_emails WHERE customer_id = $1 ORDER BY sent_at DESC LIMIT 200`, customerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	emails := []SentEmail{}
+	for rows.Next() {
+		var e SentEmail
+		if err := rows.Scan(&e.ID, &e.SubmissionID, &e.ToEmail, &e.Subject, &e.BodyText, &e.SentBy, &e.SentAt); err != nil {
+			return nil, err
+		}
+		emails = append(emails, e)
+	}
+	return emails, rows.Err()
+}
+
 // handleCustomerEmail sends a one-off composed email to a single customer
-// from their CRM page and records it on the activity timeline. Suppression
-// flags (unsubscribed/bounced) do not block it: this is personal
+// from their CRM page and stores the full message as the outgoing record.
+// Suppression flags (unsubscribed/bounced) do not block it: this is personal
 // correspondence initiated by an operator, not a marketing send.
 func (s *server) handleCustomerEmail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1523,23 +1592,34 @@ func (s *server) handleCustomerEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A reply targets one received message; verify the submission really
+	// belongs to this customer before threading under it.
+	var replyTo sql.NullInt64
+	if v := r.FormValue("submission_id"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			var owner sql.NullInt64
+			if err := s.db.QueryRowContext(r.Context(),
+				"SELECT customer_id FROM submissions WHERE id=$1", n).Scan(&owner); err == nil && owner.Valid && owner.Int64 == id {
+				replyTo = sql.NullInt64{Int64: n, Valid: true}
+			}
+		}
+	}
+
 	if err := s.sendSMTP(email, s.buildDirectMessage(email, subject, body)); err != nil {
 		log.Printf("direct email to customer %d failed: %v", id, err)
 		http.Redirect(w, r, view+"&saved=mailfail", http.StatusSeeOther)
 		return
 	}
 
-	// Timeline record: subject plus a text excerpt so the thread is readable
-	// without leaving the page.
-	excerpt := htmlToText(body)
-	if len(excerpt) > 1500 {
-		excerpt = excerpt[:1500] + "…"
-	}
+	// Full outgoing record; the timeline picks it up from here (no separate
+	// activity row). Storage failure after a successful send is only logged —
+	// the message is out either way.
 	user, _ := r.Context().Value(ctxKeyUser).(string)
 	if _, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO activities (customer_id, kind, body, created_by) VALUES ($1, 'email', $2, $3)`,
-		id, "Sent: "+subject+"\n"+excerpt, user); err != nil {
-		log.Printf("email activity insert error: %v", err)
+		`INSERT INTO sent_emails (customer_id, submission_id, to_email, subject, body_html, body_text, sent_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		id, replyTo, email, subject, body, htmlToText(body), user); err != nil {
+		log.Printf("sent email record insert error: %v", err)
 	}
 
 	http.Redirect(w, r, view+"&saved=mailsent", http.StatusSeeOther)
@@ -1861,6 +1941,12 @@ func (s *server) loadTimeline(ctx context.Context, customerID int64) ([]Timeline
 		     m.created_by, mr.sent_at, m.id
 		 FROM mailing_recipients mr JOIN mailings m ON m.id = mr.mailing_id
 		 WHERE mr.customer_id = $1 AND mr.sent_at IS NOT NULL
+		 UNION ALL
+		 SELECT 'email',
+		     'Sent: ' || subject || CASE WHEN submission_id IS NOT NULL
+		         THEN ' (reply to #' || submission_id || ')' ELSE '' END,
+		     sent_by, sent_at, NULL::integer
+		 FROM sent_emails WHERE customer_id = $1
 		 ORDER BY created_at DESC LIMIT 200`, customerID)
 	if err != nil {
 		return nil, err

@@ -111,6 +111,7 @@ type Submission struct {
 	CustomerName      sql.NullString
 	CustomerEmail     sql.NullString
 	EmailUnresolvable bool
+	SentReplies       []SentEmail
 }
 
 type FieldEntry struct {
@@ -559,7 +560,7 @@ func secureSocket(path, owner, group string) error {
 }
 
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks", "media"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks", "media", "sent_emails"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -1439,6 +1440,12 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.attachSentReplies(r.Context(), submissions); err != nil {
+		log.Printf("attach sent replies error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	if err := s.refreshDefaultPasswordFlag(r.Context()); err != nil {
 		log.Printf("password flag error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
@@ -1584,7 +1591,8 @@ func pruneOrphanCustomers(ctx context.Context, tx *sql.Tx, ids []int64) error {
 		   AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.customer_id = c.id)
 		   AND NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.customer_id = c.id)
 		   AND NOT EXISTS (SELECT 1 FROM mailing_recipients mr WHERE mr.customer_id = c.id)
-		   AND NOT EXISTS (SELECT 1 FROM activities a WHERE a.customer_id = c.id)`,
+		   AND NOT EXISTS (SELECT 1 FROM activities a WHERE a.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM sent_emails se WHERE se.customer_id = c.id)`,
 		pq.Array(ids))
 	return err
 }
@@ -1677,6 +1685,12 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.attachSentReplies(r.Context(), submissions); err != nil {
+		log.Printf("poll attach sent replies error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	latest := after
 	var buf bytes.Buffer
 	if len(submissions) > 0 {
@@ -1726,6 +1740,12 @@ func (s *server) handleArchived(w http.ResponseWriter, r *http.Request) {
 	submissions, total, err := s.listSubmissions(r.Context(), "archived", page, defaultItemsPerPage, false)
 	if err != nil {
 		log.Printf("list archived submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.attachSentReplies(r.Context(), submissions); err != nil {
+		log.Printf("attach sent replies error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -2321,9 +2341,46 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.attachSentReplies(r.Context(), subs); err != nil {
+		log.Printf("customer attach sent replies error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	sentEmails, err := s.customerSentEmails(r.Context(), id)
+	if err != nil {
+		log.Printf("customer sent emails error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	// ?re=<submission id> arrives from a card's reply chip: thread the
+	// composed message under that received message and prefill the subject.
+	var reID int64
+	var reSubject string
+	if reStr := r.URL.Query().Get("re"); reStr != "" {
+		if n, err := strconv.ParseInt(reStr, 10, 64); err == nil && n > 0 {
+			var subj sql.NullString
+			if err := s.db.QueryRowContext(r.Context(),
+				"SELECT form_data->>'subject' FROM submissions WHERE id=$1 AND customer_id=$2",
+				n, id).Scan(&subj); err == nil {
+				reID = n
+				if t := strings.TrimSpace(subj.String); t != "" {
+					if !strings.HasPrefix(strings.ToLower(t), "re:") {
+						t = "Re: " + t
+					}
+					reSubject = t
+				}
+			}
+		}
+	}
+
 	data := map[string]interface{}{
 		"Customer":       customer,
 		"Submissions":    subs,
+		"SentEmails":     sentEmails,
+		"ReID":           reID,
+		"ReSubject":      reSubject,
 		"Timeline":       timeline,
 		"TagChips":       chips,
 		"AllTags":        allTags,

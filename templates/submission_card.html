@@ -8,7 +8,7 @@
       <span class="meta-top-links">
         {{if .S.CustomerID.Valid}}
         <a class="assoc" href="{{.AdminPrefix}}/customers/view?id={{.S.CustomerID.Int64}}">&#9679; {{if .S.CustomerName.String}}{{.S.CustomerName.String}}{{else}}{{.S.CustomerEmail.String}}{{end}}</a>
-        {{if .S.CustomerEmail.String}}<a class="assoc" href="{{.AdminPrefix}}/customers/view?id={{.S.CustomerID.Int64}}#compose" title="Compose an email to this customer">&#9993; reply</a>{{end}}
+        {{if .S.CustomerEmail.String}}<a class="assoc" href="{{.AdminPrefix}}/customers/view?id={{.S.CustomerID.Int64}}&re={{.S.ID}}#compose" title="Compose a reply — it will be attached under this message">&#9993; reply</a>{{end}}
         {{end}}
         {{if .S.EmailUnresolvable}}<span class="status-pill failed" title="The email domain had no MX or A record at submission time">bad email</span>{{end}}
         <span class="status-pill {{.S.Status}}">{{.S.Status}}</span>
@@ -70,4 +70,15 @@
       <button type="submit" class="danger" title="Permanently delete this entry (unlike archiving)">Delete</button>
     </form>
   </div>
+  {{if .S.SentReplies}}
+  {{/* Replies sent from the CRM, threaded under the message they answer. */}}
+  <div class="sent-replies">
+    {{range .S.SentReplies}}
+    <details class="sent-reply">
+      <summary>&#8617; replied {{.SentAt.Format "2006-01-02 15:04"}}{{with .SentBy.String}} by {{.}}{{end}} &middot; {{.Subject}}</summary>
+      <pre class="sent-body">{{.BodyText}}</pre>
+    </details>
+    {{end}}
+  </div>
+  {{end}}
 </div>
