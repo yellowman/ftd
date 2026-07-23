@@ -210,10 +210,14 @@ can actually receive mail: an MX record, or failing that an A/AAAA record
 the data is captured and flagged, and the response tells your site so it can
 warn the visitor to double-check their address.
 
-Only an authoritative "domain does not exist" flags an entry; resolver
-timeouts or failures never penalize a visitor. Nameservers are read from
-`/etc/resolv.conf` once at startup (the daemon chroots afterward); with none
-configured the check is disabled and nothing is ever flagged.
+An entry is flagged when the address demonstrably cannot receive mail:
+either it is syntactically impossible (malformed domain, invalid IP
+literal — no DNS query needed), or DNS answers an authoritative "domain
+does not exist" / null MX. Resolver timeouts or failures never penalize a
+visitor, and non-ASCII (IDN) domains are skipped rather than guessed at.
+Nameservers are read from `/etc/resolv.conf` once at startup (the daemon
+chroots afterward); with none configured the DNS half of the check is
+disabled — syntax checking still applies.
 
 **How the warning reaches your site** — the response shape depends on how the
 form was submitted, and the contract is stable:
@@ -250,8 +254,8 @@ form was submitted, and the contract is stable:
 
 3. *Plain form post, no redirect, no JSON.* The `202 Accepted` text body is
    either `submission received` or
-   `submission received (warning: the email domain does not resolve; the
-   address may be undeliverable)`.
+   `submission received (warning: the email address does not appear to be
+   deliverable)`.
 
 The warning is advisory: the submission is already stored by the time the
 response goes out, so a visitor with a typo'd address still lands in the

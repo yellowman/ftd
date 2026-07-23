@@ -9,9 +9,10 @@ CREATE TABLE IF NOT EXISTS submissions (
     file_path TEXT,
     comment TEXT,
     form_data JSONB NOT NULL,
-    -- Set at intake when the supplied email's domain had no MX or A/AAAA
-    -- record (authoritative NXDOMAIN/NODATA or RFC 7505 null MX only —
-    -- transient DNS failures never set it).
+    -- Set at intake when the supplied email cannot receive mail: the address
+    -- or domain is syntactically impossible, or the domain has no MX or
+    -- A/AAAA record (authoritative NXDOMAIN/NODATA or RFC 7505 null MX).
+    -- Transient DNS failures never set it.
     email_unresolvable BOOLEAN NOT NULL DEFAULT FALSE
 );
 

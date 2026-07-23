@@ -34,9 +34,14 @@ const emailCheckTimeout = 3 * time.Second
 type emailVerdict int
 
 const (
-	emailOK      emailVerdict = iota // domain resolves; no warning
-	emailInvalid                     // authoritative "does not exist" / null MX
-	emailUnknown                     // no email, DNS trouble, or checker disabled
+	emailOK emailVerdict = iota // domain resolves; no warning
+	// emailInvalid means the address cannot receive mail: syntactically
+	// impossible (malformed domain, bad IP literal), or the domain
+	// authoritatively does not exist (NXDOMAIN/NODATA), or it publishes a
+	// null MX. Syntax failures flag without a DNS query — they are stronger
+	// evidence of undeliverability than a missing record.
+	emailInvalid
+	emailUnknown // no email, DNS trouble, or checker disabled
 )
 
 type emailChecker struct {
@@ -92,11 +97,9 @@ func parseResolvConf(path string) []string {
 }
 
 // verdict classifies the deliverability of an email address by its domain.
+// The syntax half runs even with DNS disabled (nil receiver): a malformed
+// address needs no lookup to be undeliverable.
 func (c *emailChecker) verdict(ctx context.Context, email string) emailVerdict {
-	if c == nil {
-		return emailUnknown
-	}
-
 	at := strings.LastIndexByte(email, '@')
 	if at < 1 || at == len(email)-1 {
 		return emailInvalid
@@ -124,6 +127,10 @@ func (c *emailChecker) verdict(ctx context.Context, email string) emailVerdict {
 	domain = strings.TrimSuffix(domain, ".")
 	if !validMailDomain(domain) {
 		return emailInvalid
+	}
+
+	if c == nil {
+		return emailUnknown // syntax passed; DNS half is disabled
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, emailCheckTimeout)
