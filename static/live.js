@@ -66,7 +66,9 @@
       })
       .then(function (data) {
         failures = 0;
-        interval = baseInterval;
+        // A full batch means more submissions are waiting beyond the new
+        // cursor: follow up almost immediately until caught up.
+        interval = data.more ? 300 : baseInterval;
         if (data.latest > after) after = data.latest;
         if (data.html) insert(data.html);
       })

@@ -1699,7 +1699,10 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "template not found", http.StatusInternalServerError)
 			return
 		}
-		for _, sub := range submissions {
+		// The batch is oldest-first (cursor correctness); the fragment is
+		// rendered newest-first so the client can prepend it as one block.
+		for i := len(submissions) - 1; i >= 0; i-- {
+			sub := submissions[i]
 			if sub.ID > latest {
 				latest = sub.ID
 			}
@@ -1721,6 +1724,9 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"latest": latest,
 		"html":   buf.String(),
+		// A full batch means the backlog may extend past this cursor; the
+		// client follows up immediately instead of waiting an interval.
+		"more": len(submissions) == defaultItemsPerPage,
 	}); err != nil {
 		log.Printf("poll encode error: %v", err)
 	}
@@ -1929,8 +1935,12 @@ func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // listSubmissionsAfter returns up to limit submissions with id > after,
-// newest first, honoring the dashboard's status filter (archived is always
-// excluded — the live view never shows archived items).
+// OLDEST first, honoring the dashboard's status filter (archived is always
+// excluded — the live view never shows archived items). Ascending order
+// matters: the poll cursor advances to the max id of the returned batch, so
+// walking the backlog from the low end guarantees no id is ever skipped when
+// more than one batch arrived between polls — the next poll picks up where
+// this one stopped.
 func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status string, limit int) ([]Submission, error) {
 	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
 	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, sub.email_unresolvable, c.name, c.email
@@ -1943,7 +1953,7 @@ func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status s
 	} else {
 		query += " AND sub.status <> 'archived'"
 	}
-	query += " ORDER BY sub.id DESC LIMIT $" + strconv.Itoa(len(args)+1)
+	query += " ORDER BY sub.id ASC LIMIT $" + strconv.Itoa(len(args)+1)
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -2466,6 +2476,8 @@ func mapCustomerFlash(code string) *passwordFlash {
 		return &passwordFlash{Message: "Email sent and logged on the timeline.", Kind: "success"}
 	case "mailfail":
 		return &passwordFlash{Message: "Sending failed — check the SMTP relay and the daemon log.", Kind: "error"}
+	case "mailrecfail":
+		return &passwordFlash{Message: "The email WAS sent, but recording it failed — the timeline and outgoing list are missing this message. Do not resend; check the daemon log.", Kind: "warning"}
 	case "mailempty":
 		return &passwordFlash{Message: "Subject and body are both required.", Kind: "error"}
 	case "mailbad":

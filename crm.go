@@ -1612,14 +1612,17 @@ func (s *server) handleCustomerEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Full outgoing record; the timeline picks it up from here (no separate
-	// activity row). Storage failure after a successful send is only logged —
-	// the message is out either way.
+	// activity row). The message is already out, so a storage failure can't
+	// be rolled back — but the operator must know the ledger is missing this
+	// message, so the flash says "sent but not recorded" instead of success.
 	user, _ := r.Context().Value(ctxKeyUser).(string)
 	if _, err := s.db.ExecContext(r.Context(),
 		`INSERT INTO sent_emails (customer_id, submission_id, to_email, subject, body_html, body_text, sent_by)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		id, replyTo, email, subject, body, htmlToText(body), user); err != nil {
 		log.Printf("sent email record insert error: %v", err)
+		http.Redirect(w, r, view+"&saved=mailrecfail", http.StatusSeeOther)
+		return
 	}
 
 	http.Redirect(w, r, view+"&saved=mailsent", http.StatusSeeOther)
