@@ -1,44 +1,42 @@
-# ftd
+# ftd — form To Do
 
-FastCGI form collector and mini-CRM. HTML forms post to it, submissions become
-to-do items in an admin dashboard, and submitters become customer records you
-can organize into lists and send tracked mailings to. Single Go binary,
+Turn form posts into to-dos. HTML forms post to ftd over FastCGI, submissions
+land in an admin inbox, and submitters become customer records you can
+organize into lists, tag, and send tracked mailings to. Single Go binary,
 PostgreSQL storage, hardened for OpenBSD (chroot, privilege drop, pledge).
 
 ## Features
 
 - Accepts arbitrary form fields (stored as JSONB) plus request metadata; optional single file upload.
-- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), reviewer comments, multi-user accounts, CSRF/secure-cookie/security-header hardening.
+- Admin dashboard: submission queue with statuses (`new` → `in_progress` → `complete` → `archived`), live updates (new submissions appear without a reload), reviewer comments, per-card hard delete for test/junk entries (also removes a customer record that existed only because of that entry), multi-user accounts, CSRF/secure-cookie/security-header hardening.
+- Email deliverability check at intake: DNS MX/A lookup on the submitted address's domain; unresolvable addresses are captured but flagged, the submitting site gets a warning to show the visitor, and flagged entries can be bulk-deleted from the dashboard.
 - CRM: submissions auto-create/update customers keyed on email; searchable directory, manual creation, CSV import/export, per-customer activity timeline.
 - Interest tags: normalized vocabulary with per-tag provenance — set by hand, declared by forms (hidden `tags` field), or inherited automatically when a customer clicks a tagged mailing's links.
 - Mailings: lists + segment tools, HTML campaigns over an SMTP relay, test-send, per-recipient delivery status, open tracking, click tracking, unsubscribe handling, bounce suppression.
 - Reply capture: route your Reply-To mailbox into ftd (Postfix LMTP or a pipe helper) and customer replies appear as new to-do submissions linked to their customer record.
 - Rate limiting: 8 submissions/minute per IP with a 1-hour block (both env-tunable), global 5-minute pause on bursts of 30+ distinct IPs. Blocked requests get HTTP 429 with `Retry-After`.
 
-## Quick start (any platform)
+## Quick start (any platform, 3 commands)
 
 ```sh
-make                            # builds ftd (fetches deps on first run)
-doas make install               # binary, /etc/ftd.conf (kept if present), rc script
-createdb ftd
-psql ftd < schema.sql           # idempotent; re-run it after upgrades
-DATABASE_URL="postgres://user:pass@localhost/ftd?sslmode=disable" ftd -tcp 9000
+make                                          # builds ftd (fetches deps on first run)
+createdb ftd && psql ftd < schema.sql         # schema is idempotent; re-run after upgrades
+DATABASE_URL="postgres://user:pass@localhost/ftd?sslmode=disable" ./ftd -tcp 9000
 ```
 
-Point a FastCGI-capable web server at TCP 9000 (or at the Unix socket, see
-below), then log in at `/form/admin/` as `admin` / `change-me` and change the
-password. Sample forms: `sample_form.html`, `sample_form_upload.html`.
+Point a FastCGI-capable web server at TCP 9000, log in at `/form/admin/` as
+`admin` / `change-me`, change the password. Sample forms:
+`sample_form.html`, `sample_form_upload.html`. For a real install follow a
+platform section below — it's the same three steps plus a service account,
+a unix socket, and `/etc/ftd.conf`.
 
-(Inline environment variables work for one-off runs like this; for a real
-install put the settings in `/etc/ftd.conf` — see Configuration.)
+**The one Postgres rule:** load `schema.sql` as the same role ftd connects
+as, so that role owns every table and sequence — then permissions can never
+bite you. If your admin account differs from the ftd role, prefix the load
+with `SET ROLE` (used in the recipes below):
 
-**Database permissions:** the role in `database_url` needs the tables *and*
-sequences. Easiest is to run `schema.sql` as that role so it owns everything.
-Otherwise, as the owner:
-
-```sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ftd;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ftd;
+```sh
+(echo 'SET ROLE ftd;'; cat schema.sql) | psql ftd
 ```
 
 ## OpenBSD setup (httpd)
@@ -48,15 +46,20 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ftd;
 pkg_add go postgresql-server postgresql-client
 useradd -m _ftd
 
-# 2. Database
-su - _postgresql -c "createdb ftd"
-psql ftd < schema.sql
+# 2. Postgres (first time only: init and start the cluster)
+su - _postgresql -c "initdb -D /var/postgresql/data -U postgres"
+rcctl enable postgresql && rcctl start postgresql
 
-# 3. Build and install (binary, /etc/ftd.conf if absent, /etc/rc.d/ftd)
+# 3. Role + database + schema (schema owned by the ftd role)
+su - _postgresql -c "psql -U postgres -c \"CREATE ROLE ftd LOGIN PASSWORD 'changeme'\""
+su - _postgresql -c "createdb -U postgres -O ftd ftd"
+(echo 'SET ROLE ftd;'; cat schema.sql) | su - _postgresql -c "psql -U postgres ftd"
+
+# 4. Build and install (binary, /etc/ftd.conf if absent, /etc/rc.d/ftd)
 make
 doas make install
 
-# 4. Socket directory for httpd
+# 5. Socket directory for httpd
 install -d -m 750 -o _ftd -g www /var/www/run
 ```
 
@@ -66,17 +69,21 @@ install -d -m 750 -o _ftd -g www /var/www/run
 server "example.com" {
     listen on * port 80
 
-    location "/form"         { fastcgi socket "/var/www/run/ftd.sock" }
-    location "/form/t/*"     { fastcgi socket "/var/www/run/ftd.sock" }
-    location "/form/admin/*" { fastcgi socket "/var/www/run/ftd.sock" }
+    # httpd is chrooted to /var/www: socket paths here are inside the chroot,
+    # so /run/ftd.sock is the file ftd creates at /var/www/run/ftd.sock.
+    location "/form"         { fastcgi socket "/run/ftd.sock" }
+    location "/form/t/*"     { fastcgi socket "/run/ftd.sock" }
+    location "/form/admin/*" { fastcgi socket "/run/ftd.sock" }
 }
 ```
 
-Configuration and startup (the daemon reads `/etc/ftd.conf` itself; see the
-Configuration section; `make install` already placed the example there):
+Configure and start (`make install` already placed the example config;
+every option is listed there, commented out):
 
 ```sh
-vi /etc/ftd.conf      # uncomment and set database_url and session_secret
+vi /etc/ftd.conf
+#   database_url = postgres://ftd:changeme@localhost/ftd?sslmode=disable
+#   session_secret = <any long random string>
 
 rcctl enable httpd ftd
 rcctl start httpd ftd
@@ -93,9 +100,10 @@ into the chroot.
 sudo apt-get install -y golang postgresql nginx
 sudo useradd -m -s /usr/sbin/nologin _ftd
 
-# 2. Database
-sudo -u postgres createdb -O ftd ftd     # after: sudo -u postgres createuser ftd
-psql -U ftd ftd < schema.sql
+# 2. Role + database + schema (schema owned by the ftd role)
+sudo -u postgres psql -c "CREATE ROLE ftd LOGIN PASSWORD 'changeme'"
+sudo -u postgres createdb -O ftd ftd
+(echo 'SET ROLE ftd;'; cat schema.sql) | sudo -u postgres psql ftd
 
 # 3. Build and install (binary + /etc/ftd.conf if absent)
 make
@@ -120,13 +128,13 @@ server {
 ```
 
 (The `/form` prefix also covers `/form/admin/` and `/form/t/`; add explicit
-blocks only if you move `ADMIN_PREFIX`/`TRACK_PATH` elsewhere.)
+blocks only if you move `admin_prefix`/`track_path` elsewhere.)
 
 `/etc/systemd/system/ftd.service`:
 
 ```
 [Unit]
-Description=ftd form collector
+Description=ftd - form To Do
 After=network.target postgresql.service
 
 [Service]
@@ -138,7 +146,11 @@ WantedBy=multi-user.target
 ```
 
 ```sh
-sudo vi /etc/ftd.conf     # uncomment and set database_url and session_secret
+sudo vi /etc/ftd.conf
+#   database_url = postgres://ftd:changeme@localhost/ftd?sslmode=disable
+#   session_secret = <any long random string>
+#   socket_group = www-data
+
 sudo systemctl enable --now ftd
 ```
 
@@ -158,6 +170,7 @@ development and one-off runs.
 | --- | --- | --- |
 | `database_url` | PostgreSQL connection string. Add `?sslmode=disable` for a local non-TLS server; use `sslmode=require`/`verify-full` for remote ones. | **Required** |
 | `fastcgi_socket` | Unix socket path for the FastCGI listener (ignored with `-tcp`). | `/var/www/run/ftd.sock` |
+| `socket_user` / `socket_group` | Owner of the FastCGI socket (user:group, mode 0660), applied before privileges drop so the web server can connect. `www-data` on Debian-style Linux. Unresolvable names → mode 0666 fallback. | `www` / `www` |
 | `form_path` | Submission endpoint path. | `/form` |
 | `admin_prefix` | Admin dashboard path prefix. | `/form/admin` |
 | `track_path` | Public tracking endpoints prefix (`/open`, `/c`, `/unsub`, `/img`). | `/form/t` |
@@ -172,6 +185,7 @@ development and one-off runs.
 | `public_base_url` | Public origin (e.g. `https://example.com`) used to build tracking/unsubscribe URLs. Without it mail goes out untracked and without an unsubscribe link. | Not set |
 | `reply_to` | Reply-To address on outgoing mailings — point it at the mailbox your MTA routes into ftd (below) so replies come back as to-dos. | Not set |
 | `reply_lmtp_socket` | Unix socket path for the inbound-reply LMTP listener; unset disables it. | Not set |
+| `reply_lmtp_user` / `reply_lmtp_group` | Owner of the LMTP socket (user:group, mode 0660) so the MTA's delivery agent — a different user than the web server — can connect. `postfix` on Linux. Unresolvable names → mode 0666 fallback. | `_postfix` / `_postfix` |
 
 Flags: `-tcp <port>` listens on TCP instead of the Unix socket;
 `-c <path>` (or `-config <path>`) selects the configuration file; `-deliver`
@@ -184,8 +198,75 @@ daemon flags through rc.d as usual — e.g. an alternate config:
 **Forms** — point any form's `action` at `/form`. All fields are stored as
 submitted. A hidden `redirect` field sends the submitter to a thank-you page
 afterward; the target must be a root-relative path or a same-host URL
-(cross-host redirects are rejected). With `MAX_UPLOAD_MB` set, one file field
+(cross-host redirects are rejected). With `max_upload_mb` set, one file field
 per form is accepted and stored under `uploads/` in the chroot.
+
+### Email deliverability check
+
+When a submission carries an email address, ftd checks (DNS) that the domain
+can actually receive mail: an MX record, or failing that an A/AAAA record
+(the implicit MX of RFC 5321). A lone `MX 0 .` (RFC 7505 null MX) counts as
+"accepts no mail". An unresolvable address **never rejects the submission** —
+the data is captured and flagged, and the response tells your site so it can
+warn the visitor to double-check their address.
+
+An entry is flagged when the address demonstrably cannot receive mail:
+either it is syntactically impossible (malformed domain, invalid IP
+literal — no DNS query needed), or DNS answers an authoritative "domain
+does not exist" / null MX. Resolver timeouts or failures never penalize a
+visitor, and non-ASCII (IDN) domains are skipped rather than guessed at.
+Nameservers are read from `/etc/resolv.conf` once at startup (the daemon
+chroots afterward); with none configured the DNS half of the check is
+disabled — syntax checking still applies.
+
+**How the warning reaches your site** — the response shape depends on how the
+form was submitted, and the contract is stable:
+
+1. *Classic form post with a `redirect` field.* ftd answers
+   `303 See Other` as usual, but the redirect URL gains one query parameter:
+   `ftd_email=unresolvable`. Existing parameters are preserved. Toast it on
+   the thank-you page:
+
+   ```html
+   <script>
+   if (new URLSearchParams(location.search).get("ftd_email") === "unresolvable") {
+     showToast("Heads up — your email address doesn't look deliverable. " +
+               "Double-check it if you want a reply.");
+   }
+   </script>
+   ```
+
+2. *fetch/XHR submission.* Send `Accept: application/json` and the
+   `202 Accepted` body is machine-readable:
+
+   ```js
+   const resp = await fetch("/form", {
+     method: "POST",
+     body: new FormData(form),
+     headers: { "Accept": "application/json" },
+   });
+   const data = await resp.json();
+   // -> { "status": "accepted", "email_unresolvable": true | false }
+   if (data.email_unresolvable) {
+     showToast("Your email address doesn't look deliverable — please check it.");
+   }
+   ```
+
+3. *Plain form post, no redirect, no JSON.* The `202 Accepted` text body is
+   either `submission received` or
+   `submission received (warning: the email address does not appear to be
+   deliverable)`.
+
+The warning is advisory: the submission is already stored by the time the
+response goes out, so a visitor with a typo'd address still lands in the
+inbox (flagged) rather than being bounced.
+
+**Cleaning up flagged entries** — flagged submissions show a red
+**bad email** badge in the inbox, and a **Delete bad email (N)** button
+appears in the dashboard header whenever any exist. One click (with a
+confirmation) deletes all flagged submissions in a single transaction, plus
+any customer records that existed *only* because of them — a customer with
+any other submission, list membership, or mailing history is left alone.
 
 **Customers** — submissions with a recognizable `email` field auto-create or
 update a customer (name/company/phone/address are picked up too; blank fields
@@ -197,6 +278,31 @@ existing state untouched — a re-import can never make a suppressed address
 mailable again. Each customer page has the editable profile, an
 activity timeline (notes/calls/emails/meetings + automatic mailing history),
 and their submissions.
+
+**Direct replies & the sent-mail record** — every customer page has a Send
+email composer (the same WYSIWYG editor as mailings). It sends one personal
+message through the configured SMTP relay: no tracking links, no open pixel,
+no unsubscribe footer, no bulletproof table wrapper — just
+`multipart/alternative` with an auto-generated plain-text version. Every
+sent message is stored in full and kept visible in three places:
+
+- *Threaded under the received message.* Reach the composer through a card's
+  ✉ reply chip and the sent reply attaches beneath that submission in the
+  inbox (expandable, with sender and timestamp) — the conversation reads in
+  place. The chip prefills the subject (`Re: …`) when the received message
+  had one.
+- *Outgoing email* on the customer page lists all of their sent messages,
+  newest first, each expandable to the full text and linking back to the
+  submission it answered (a message composed without a reply context shows
+  as plain outgoing mail).
+- The activity timeline logs each send inline with everything else.
+
+`reply_to` routes the customer's answer back into the inbox, so the loop is
+form → inbox → reply → their answer, all recorded. Suppression flags don't
+block direct replies: unsubscribed means "no marketing", not "no
+correspondence". This is deliberately record-keeping, not a mail client —
+if a conversation outgrows it, move that thread to your regular mailer; the
+record of what was sent stays here.
 
 **Tags** — the interest system. Tags live in a normalized vocabulary
 (lowercase; manage it on the Tags page) and attach to customers with a
@@ -214,10 +320,12 @@ clicked, when, and how often.
 page; the dashboard password form changes the logged-in user's password.
 
 **Lists & mailings** — group customers into lists by email, or bulk-add by tag
-/ recent submitters. Compose in the built-in WYSIWYG editor (bold/lists/
-headings/links/CTA buttons, with an HTML-source toggle for hand editing —
-plain textarea if JavaScript is off), upload images to the media library and
-insert them (stored in Postgres, served publicly under `TRACK_PATH/img` so
+/ recent submitters. Compose in the built-in WYSIWYG editor — paragraph
+format menu, bold/italic/underline/strike, lists, quotes, links (Ctrl+K,
+inline dialog), images, CTA buttons, divider, undo/redo, with active-state
+highlighting and an HTML-source toggle for hand editing; plain textarea if
+JavaScript is off — upload images to the media library and
+insert them (stored in Postgres, served publicly under `track_path/img` so
 mail clients can fetch them), and check layout in the live preview pane, which
 renders the saved draft in a mail-client-style frame and marks where the
 unsubscribe link and tracking pixel land. Pick a list (or all customers),
@@ -268,8 +376,10 @@ sales@example.com  lmtp:unix:/var/www/run/ftd-lmtp.sock
 Run `postmap /etc/postfix/transport && postfix reload`. If your `master.cf`
 runs the `lmtp` agent chrooted (Debian default), either set its chroot column
 to `n` or place the socket under `/var/spool/postfix/` and adjust the path.
-ftd creates the socket mode 0660 — make it connectable by Postfix (e.g.
-`chgrp postfix` on the socket or run the socket directory group-shared).
+Set `reply_lmtp_user` / `reply_lmtp_group` (default `_postfix` as on OpenBSD;
+`postfix` on Linux) and ftd chowns the socket user:group mode 0660 itself
+before dropping privileges — a separate owner from the web-facing FastCGI
+socket, since the MTA and the web server run as different users.
 
 *Pipe helper (simplest — Postfix invokes ftd per message):*
 
@@ -373,7 +483,7 @@ pick a new selector, publish the new TXT record, then switch the signer.
 
 ## Security notes
 
-- Set a strong `SESSION_SECRET` and change the default admin password immediately (the UI nags until you do).
+- Set a strong `session_secret` and change the default admin password immediately (the UI nags until you do).
 - Terminate TLS at the web server. Rate limiting keys on the FastCGI peer address (`REMOTE_ADDR`); a client-supplied `X-Forwarded-For` is stored for reference but never trusted.
 - Started as root, ftd chroots to `_ftd`'s home and drops privileges after opening its sockets; on OpenBSD it then pledges down to the minimal promises needed to serve.
 - Admin POSTs require CSRF tokens; cookies are `Secure`/`HttpOnly`/`SameSite=Strict`; responses carry restrictive security headers.

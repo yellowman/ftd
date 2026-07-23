@@ -45,36 +45,6 @@
     <div class="alert {{.Kind}}">{{.Message}}</div>
     {{end}}
 
-    <section class="password-card">
-      <div>
-        <h2>New customer</h2>
-        <p>Create a record by hand — forms only carry whatever optional fields the submitter filled in, so complete the rest here.</p>
-      </div>
-      <form method="post" action="{{.AdminPrefix}}/customers">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label>Email<input type="email" name="email" required></label>
-        <label>Name<input type="text" name="name"></label>
-        <label>Company<input type="text" name="company"></label>
-        <label>Phone<input type="text" name="phone"></label>
-        <label>Address<input type="text" name="address"></label>
-        <label>Tags<input type="text" name="tags" placeholder="comma,separated"></label>
-        <button type="submit">Create customer</button>
-      </form>
-    </section>
-
-    <section class="password-card">
-      <div>
-        <h2>Import / export</h2>
-        <p>CSV with an <code>email</code> column (plus optional name, company, phone, address, tags, notes). Rows upsert by email; blanks never overwrite existing data.</p>
-        <p><a class="export-link" href="{{.AdminPrefix}}/customers/export">Download customers.csv</a></p>
-      </div>
-      <form method="post" action="{{.AdminPrefix}}/customers/import" enctype="multipart/form-data">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label class="full">CSV file<input type="file" name="file" accept=".csv,text/csv" required></label>
-        <button type="submit">Import CSV</button>
-      </form>
-    </section>
-
     <section class="customers">
       {{if not .Customers}}
       <p>No customers found{{if .Query}} for “{{.Query}}”{{end}}.</p>
@@ -86,7 +56,7 @@
         <tbody>
           {{range .Customers}}
           <tr>
-            <td><a href="{{$.AdminPrefix}}/customers/view?id={{.ID}}">{{if .Name.Valid}}{{.Name.String}}{{else}}—{{end}}</a></td>
+            <td><a href="{{$.AdminPrefix}}/customers/view?id={{.ID}}">{{if .Name.String}}{{.Name.String}}{{else}}{{.Email.String}}{{end}}</a></td>
             <td>{{.Email.String}}</td>
             <td>{{.Company.String}}</td>
             <td class="tags-cell">{{range .TagsList}}<a class="assoc" href="{{$.AdminPrefix}}/customers?tag={{.}}">{{.}}</a> {{end}}</td>
@@ -112,6 +82,42 @@
       <a href="{{.Path}}?page={{add .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Next</a>
       {{end}}
     </footer>
+
+    <details class="tools">
+      <summary>New customer</summary>
+      <section class="password-card">
+        <div>
+          <h2>New customer</h2>
+          <p>Create a record by hand — forms only carry whatever optional fields the submitter filled in, so complete the rest here.</p>
+        </div>
+        <form method="post" action="{{.AdminPrefix}}/customers">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <label>Email<input type="email" name="email" required></label>
+          <label>Name<input type="text" name="name"></label>
+          <label>Company<input type="text" name="company"></label>
+          <label>Phone<input type="text" name="phone"></label>
+          <label>Address<input type="text" name="address"></label>
+          <label>Tags<input type="text" name="tags" placeholder="comma,separated"></label>
+          <button type="submit">Create customer</button>
+        </form>
+      </section>
+    </details>
+
+    <details class="tools">
+      <summary>Import / export CSV</summary>
+      <section class="password-card">
+        <div>
+          <h2>Import / export</h2>
+          <p>CSV with an <code>email</code> column (plus optional name, company, phone, address, tags, notes). Rows upsert by email; blanks never overwrite existing data.</p>
+          <p><a class="export-link" href="{{.AdminPrefix}}/customers/export">Download customers.csv</a></p>
+        </div>
+        <form method="post" action="{{.AdminPrefix}}/customers/import" enctype="multipart/form-data">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <label class="full">CSV file<input type="file" name="file" accept=".csv,text/csv" required></label>
+          <button type="submit">Import CSV</button>
+        </form>
+      </section>
+    </details>
   </div>
 </body>
 </html>

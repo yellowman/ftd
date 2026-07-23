@@ -16,6 +16,7 @@
       <div class="actions">
         <nav class="tabs">
           <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
           <a href="{{.AdminPrefix}}/customers">Customers</a>
           <a href="{{.AdminPrefix}}/tags">Tags</a>
           <a href="{{.AdminPrefix}}/lists" class="active">Lists</a>
@@ -29,20 +30,6 @@
     {{with .Flash}}
     <div class="alert {{.Kind}}">{{.Message}}</div>
     {{end}}
-
-    <section class="password-card">
-      <div>
-        <h2>New list</h2>
-        <p>Create a list, then add customers from the list page.</p>
-      </div>
-      <form method="post" action="{{.AdminPrefix}}/lists">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="action" value="create">
-        <label>Name<input type="text" name="name" required></label>
-        <label>Description<input type="text" name="description"></label>
-        <button type="submit">Create list</button>
-      </form>
-    </section>
 
     <section class="customers">
       {{if not .Lists}}
@@ -71,6 +58,23 @@
       </table>
       {{end}}
     </section>
+
+    <details class="tools">
+      <summary>New list</summary>
+      <section class="password-card">
+        <div>
+          <h2>New list</h2>
+          <p>Create a list, then add customers from the list page.</p>
+        </div>
+        <form method="post" action="{{.AdminPrefix}}/lists">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="create">
+          <label>Name<input type="text" name="name" required></label>
+          <label>Description<input type="text" name="description"></label>
+          <button type="submit">Create list</button>
+        </form>
+      </section>
+    </details>
   </div>
 </body>
 </html>

@@ -1,8 +1,13 @@
 # ftd — BSD-style makefile. Works with OpenBSD make(1) and GNU make.
 #
-#   make            build the ftd binary
-#   doas make install   install binary, config (kept if present), rc script
-#   make clean      remove build output
+#   make                 build the ftd binary (run as your own user)
+#   doas make install    install binary, config (kept if present), rc script
+#   make clean           remove build output
+#
+# Build unprivileged and escalate only for install, ports-style: install
+# copies the binary you already built and never rebuilds as root (root builds
+# trip git's safe.directory check during VCS stamping and pollute Go's caches
+# with root-owned files).
 #
 # Override paths as usual: make install PREFIX=/opt DESTDIR=/tmp/stage
 
@@ -12,6 +17,7 @@ BINDIR?=	${PREFIX}/bin
 SYSCONFDIR?=	/etc
 RCDIR?=		${SYSCONFDIR}/rc.d
 GO?=		go
+GOFLAGS?=
 INSTALL?=	install
 
 all: ${PROG}
@@ -20,13 +26,15 @@ all: ${PROG}
 # the source list (templates/ and static/ are embedded at build time too).
 # First build on a fresh clone fetches dependencies and writes go.sum.
 # FRC forces the rule to run every time, portably across BSD and GNU make.
+# If VCS stamping fails in your environment: make GOFLAGS=-buildvcs=false
 ${PROG}: FRC
 	@[ -f go.sum ] || ${GO} mod tidy
-	${GO} build -trimpath -o ${PROG} .
+	${GO} build -trimpath ${GOFLAGS} -o ${PROG} .
 
 FRC:
 
-install: ${PROG}
+install:
+	@[ -x ${PROG} ] || { echo "${PROG} not built — run 'make' first (as your own user), then install"; exit 1; }
 	${INSTALL} -d -m 755 ${DESTDIR}${BINDIR}
 	${INSTALL} -m 755 ${PROG} ${DESTDIR}${BINDIR}/${PROG}
 	@if [ ! -e "${DESTDIR}${SYSCONFDIR}/ftd.conf" ]; then \

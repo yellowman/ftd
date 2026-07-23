@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -84,6 +84,7 @@ type server struct {
 	replyTo               string
 	publicBaseURL         string
 	defaultPasswordActive bool
+	emailCheck            *emailChecker
 }
 
 type ctxKey string
@@ -94,21 +95,23 @@ const (
 )
 
 type Submission struct {
-	ID            int64
-	SubmittedAt   time.Time
-	IP            sql.NullString
-	ForwardedFor  sql.NullString
-	UserAgent     sql.NullString
-	Referer       sql.NullString
-	Status        string
-	FilePath      sql.NullString
-	Comment       sql.NullString
-	FormData      json.RawMessage
-	FormPretty    string
-	Fields        []FieldEntry
-	CustomerID    sql.NullInt64
-	CustomerName  sql.NullString
-	CustomerEmail sql.NullString
+	ID                int64
+	SubmittedAt       time.Time
+	IP                sql.NullString
+	ForwardedFor      sql.NullString
+	UserAgent         sql.NullString
+	Referer           sql.NullString
+	Status            string
+	FilePath          sql.NullString
+	Comment           sql.NullString
+	FormData          json.RawMessage
+	FormPretty        string
+	Fields            []FieldEntry
+	CustomerID        sql.NullInt64
+	CustomerName      sql.NullString
+	CustomerEmail     sql.NullString
+	EmailUnresolvable bool
+	SentReplies       []SentEmail
 }
 
 type FieldEntry struct {
@@ -279,7 +282,21 @@ func main() {
 		log.Fatalf("failed to check admin password: %v", err)
 	}
 
-	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort)
+	// Reads /etc/resolv.conf, so this must happen before the chroot below.
+	s.emailCheck = newEmailChecker()
+
+	// The web server and the MTA run as different users, so each socket has
+	// its own owner settings.
+	socketUser := os.Getenv("SOCKET_USER")
+	if socketUser == "" {
+		socketUser = "www"
+	}
+	socketGroup := os.Getenv("SOCKET_GROUP")
+	if socketGroup == "" {
+		socketGroup = "www"
+	}
+
+	listener, desc, err := prepareFastCGIListener(fastcgiSock, *tcpPort, socketUser, socketGroup)
 	if err != nil {
 		log.Fatalf("failed to prepare FastCGI listener: %v", err)
 	}
@@ -294,8 +311,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to prepare LMTP listener: %v", err)
 		}
-		if err := os.Chmod(lmtpSock, 0660); err != nil {
-			log.Printf("lmtp socket chmod: %v", err)
+		lmtpUser := os.Getenv("REPLY_LMTP_USER")
+		if lmtpUser == "" {
+			lmtpUser = "_postfix"
+		}
+		lmtpGroup := os.Getenv("REPLY_LMTP_GROUP")
+		if lmtpGroup == "" {
+			lmtpGroup = "_postfix"
+		}
+		if err := secureSocket(lmtpSock, lmtpUser, lmtpGroup); err != nil {
+			log.Printf("lmtp socket permissions: %v", err)
 		}
 	}
 
@@ -478,7 +503,7 @@ func (s *server) refreshDefaultPasswordFlag(ctx context.Context) error {
 	return nil
 }
 
-func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, error) {
+func prepareFastCGIListener(path string, tcpPort int, socketUser, socketGroup string) (net.Listener, string, error) {
 	if tcpPort > 0 {
 		l, err := net.Listen("tcp", fmt.Sprintf(":%d", tcpPort))
 		if err != nil {
@@ -492,11 +517,50 @@ func prepareFastCGIListener(path string, tcpPort int) (net.Listener, string, err
 	if err != nil {
 		return nil, "", fmt.Errorf("listen unix: %w", err)
 	}
+	if err := secureSocket(path, socketUser, socketGroup); err != nil {
+		l.Close()
+		return nil, "", fmt.Errorf("socket permissions: %w", err)
+	}
 	return l, fmt.Sprintf("unix %s", path), nil
 }
 
+// secureSocket sets ownership and permissions on a just-created unix socket,
+// while the daemon still runs as root (before chroot/privilege drop).
+// Connecting to a unix socket requires write permission, so each socket is
+// chowned to its peer daemon's user and group — the web server (www) for the
+// FastCGI socket, the MTA's delivery user (_postfix) for the LMTP socket —
+// with mode 0660. Names that don't resolve on this system, or a chown that
+// isn't permitted (unprivileged development runs), fall back to mode 0666
+// with the socket directory's permissions gating access.
+func secureSocket(path, owner, group string) error {
+	uid, gid := -1, -1
+	if owner != "" {
+		if u, err := user.Lookup(owner); err != nil {
+			log.Printf("socket %s: user %q not found", path, owner)
+		} else if n, err := strconv.Atoi(u.Uid); err == nil {
+			uid = n
+		}
+	}
+	if group != "" {
+		if g, err := user.LookupGroup(group); err != nil {
+			log.Printf("socket %s: group %q not found", path, group)
+		} else if n, err := strconv.Atoi(g.Gid); err == nil {
+			gid = n
+		}
+	}
+	if uid == -1 && gid == -1 {
+		log.Printf("socket %s: no resolvable owner; falling back to mode 0666", path)
+		return os.Chmod(path, 0666)
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		log.Printf("socket %s: chown %s:%s: %v; falling back to mode 0666", path, owner, group, err)
+		return os.Chmod(path, 0666)
+	}
+	return os.Chmod(path, 0660)
+}
+
 func ensureSchemaPresent(db *sql.DB) error {
-	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks", "media"}
+	required := []string{"submissions", "admin_users", "submission_blocks", "admin_defaults", "customers", "lists", "list_members", "mailings", "mailing_recipients", "mailing_links", "activities", "tags", "customer_tags", "mailing_tags", "mailing_clicks", "media", "sent_emails"}
 	missing := make([]string, 0)
 
 	for _, table := range required {
@@ -553,6 +617,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/customers/update"), customerUpdate)
 	mux.Handle(s.adminPath("/customers/note"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerNote))))
 	mux.Handle(s.adminPath("/customers/clear-bounce"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerClearBounce))))
+	mux.Handle(s.adminPath("/customers/email"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerEmail))))
 	mux.Handle(s.adminPath("/customers/export"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerExport))))
 	mux.Handle(s.adminPath("/customers/import"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerImport))))
 	mux.Handle(s.adminPath("/customers/tag"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleCustomerTag))))
@@ -568,6 +633,9 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/mailings/preview"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingPreview))))
 	mux.Handle(s.adminPath("/mailings/retry"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMailingRetry))))
 	mux.Handle(s.adminPath("/mailings/media"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleMediaUpload))))
+	mux.Handle(s.adminPath("/poll"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handlePoll))))
+	mux.Handle(s.adminPath("/delete-invalid"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteInvalid))))
+	mux.Handle(s.adminPath("/delete"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteSubmission))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
@@ -679,9 +747,24 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Deliverability check on the supplied email. An undeliverable address
+	// never rejects the submission — the data is captured and flagged, and
+	// the response carries a warning the site can show the visitor. Two ways
+	// to earn the flag: the field doesn't even parse as an address, or it
+	// parses but the domain fails syntax/DNS (MX, else A/AAAA) checks.
+	emailUnresolvable := false
+	if emailFieldPresent(payload) {
+		email, _, _, _, _ := extractContact(payload)
+		if email == "" {
+			emailUnresolvable = true // supplied, but nothing parseable in any email field
+		} else if s.emailCheck.verdict(r.Context(), email) == emailInvalid {
+			emailUnresolvable = true
+		}
+	}
+
 	_, err = s.db.Exec(
-		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON, customerID,
+		`INSERT INTO submissions (ip_address, forwarded_for, user_agent, referer, file_path, form_data, customer_id, email_unresolvable) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		realIP, nullIfEmpty(forwardedFor), ua, ref, nullIfEmpty(savedFile), formJSON, customerID, emailUnresolvable,
 	)
 	if err != nil {
 		log.Printf("insert submission error: %v", err)
@@ -695,11 +778,34 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 			writeRedirectDeniedPage(w)
 			return
 		}
+		// The thank-you page can check for ftd_email=unresolvable and warn.
+		if emailUnresolvable {
+			if u, err := url.Parse(target); err == nil {
+				q := u.Query()
+				q.Set("ftd_email", "unresolvable")
+				u.RawQuery = q.Encode()
+				target = u.String()
+			}
+		}
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
 
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":             "accepted",
+			"email_unresolvable": emailUnresolvable,
+		})
+		return
+	}
+
 	w.WriteHeader(http.StatusAccepted)
+	if emailUnresolvable {
+		_, _ = w.Write([]byte("submission received (warning: the email address does not appear to be deliverable)"))
+		return
+	}
 	_, _ = w.Write([]byte("submission received"))
 }
 
@@ -1331,9 +1437,27 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-update cursor, taken BEFORE the list query. A row inserted between
+	// the two queries then appears both in the rendered page and in the first
+	// poll (id > cursor) — a duplicate the client deduplicates by submission
+	// id. The reverse order would instead skip such a row entirely: absent
+	// from the HTML yet inside the cursor, invisible until a full reload.
+	var latestID int64
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COALESCE(MAX(id), 0) FROM submissions").Scan(&latestID); err != nil {
+		log.Printf("latest submission id error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	submissions, total, err := s.listSubmissions(r.Context(), statusFilter, page, defaultItemsPerPage, true)
 	if err != nil {
 		log.Printf("list submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.attachSentReplies(r.Context(), submissions); err != nil {
+		log.Printf("attach sent replies error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -1345,6 +1469,20 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	flash := mapPasswordFlash(r.URL.Query().Get("pw"))
+
+	var invalidCount int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM submissions WHERE email_unresolvable").Scan(&invalidCount); err != nil {
+		log.Printf("invalid email count error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	var cleanupFlash *passwordFlash
+	if n := r.URL.Query().Get("cleaned"); n != "" {
+		if count, err := strconv.Atoi(n); err == nil && count >= 0 {
+			cleanupFlash = &passwordFlash{Kind: "success", Message: fmt.Sprintf("Deleted %d submission(s) with unresolvable email addresses.", count)}
+		}
+	}
 
 	data := map[string]interface{}{
 		"Submissions":     submissions,
@@ -1358,9 +1496,245 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		"AdminPrefix":     s.adminPrefix,
 		"DefaultPassword": s.defaultPasswordActive,
 		"PasswordFlash":   flash,
+		"CleanupFlash":    cleanupFlash,
+		"InvalidCount":    invalidCount,
+		"LivePoll":        page == 1,
+		"LatestID":        latestID,
 	}
 
 	renderTemplate(w, "templates/dashboard.html", data)
+}
+
+// handleDeleteInvalid bulk-deletes every submission flagged email_unresolvable,
+// along with customer records that exist only because of those submissions
+// (no other submissions, no list memberships, no mailing history — so real
+// customers whose domain later lapsed are never swept up).
+func (s *server) handleDeleteInvalid(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("delete invalid begin error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(r.Context(), "DELETE FROM submissions WHERE email_unresolvable RETURNING customer_id")
+	if err != nil {
+		log.Printf("delete invalid submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	deleted := 0
+	customerSet := map[int64]bool{}
+	for rows.Next() {
+		var cid sql.NullInt64
+		if err := rows.Scan(&cid); err != nil {
+			rows.Close()
+			log.Printf("delete invalid scan error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		deleted++
+		if cid.Valid {
+			customerSet[cid.Int64] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		log.Printf("delete invalid rows error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(customerSet) > 0 {
+		ids := make([]int64, 0, len(customerSet))
+		for id := range customerSet {
+			ids = append(ids, id)
+		}
+		if err := pruneOrphanCustomers(r.Context(), tx, ids); err != nil {
+			log.Printf("delete invalid customers error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("delete invalid commit error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, s.adminPath("/?cleaned="+strconv.Itoa(deleted)), http.StatusSeeOther)
+}
+
+// pruneOrphanCustomers removes customers (from the given candidates) that
+// exist only because of submissions just deleted in this transaction: no
+// remaining submissions, no list memberships, no mailing history, and no
+// timeline activity (notes, calls, sent emails). A customer with any real
+// footprint survives.
+func pruneOrphanCustomers(ctx context.Context, tx *sql.Tx, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx,
+		`DELETE FROM customers c WHERE c.id = ANY($1)
+		   AND NOT EXISTS (SELECT 1 FROM submissions s WHERE s.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM list_members lm WHERE lm.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM mailing_recipients mr WHERE mr.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM activities a WHERE a.customer_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM sent_emails se WHERE se.customer_id = c.id)`,
+		pq.Array(ids))
+	return err
+}
+
+// handleDeleteSubmission hard-deletes one submission (test entries, junk) —
+// unlike archiving, the row is gone. The linked customer is pruned too when
+// the deleted submission was the only reason it existed.
+func (s *server) handleDeleteSubmission(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !s.validateCSRFFromCookie(r, csrfCookieName, r.FormValue("csrf_token")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.FormValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("delete submission begin error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	var customerID sql.NullInt64
+	err = tx.QueryRowContext(r.Context(),
+		"DELETE FROM submissions WHERE id=$1 RETURNING customer_id", id).Scan(&customerID)
+	if err == sql.ErrNoRows {
+		// Already gone (double click, another admin): nothing to do.
+		http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
+		return
+	} else if err != nil {
+		log.Printf("delete submission error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if customerID.Valid {
+		if err := pruneOrphanCustomers(r.Context(), tx, []int64{customerID.Int64}); err != nil {
+			log.Printf("delete submission customer prune error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("delete submission commit error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
+}
+
+// handlePoll serves the dashboard's live-update loop: submissions with id
+// beyond the caller's cursor come back as server-rendered card fragments
+// (same partial the dashboard uses) wrapped in JSON, newest first.
+func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	after, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	if err != nil || after < 0 {
+		http.Error(w, "invalid cursor", http.StatusBadRequest)
+		return
+	}
+
+	statusFilter := r.URL.Query().Get("status")
+	if statusFilter != "" && (statusFilter == "archived" || !isValidStatus(statusFilter)) {
+		http.Error(w, "invalid status filter", http.StatusBadRequest)
+		return
+	}
+
+	submissions, err := s.listSubmissionsAfter(r.Context(), after, statusFilter, defaultItemsPerPage)
+	if err != nil {
+		log.Printf("poll submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.attachSentReplies(r.Context(), submissions); err != nil {
+		log.Printf("poll attach sent replies error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	latest := after
+	var buf bytes.Buffer
+	if len(submissions) > 0 {
+		tpl, err := template.New("submission_card.html").Funcs(templateFuncs()).ParseFS(embeddedFS, submissionCardTemplate)
+		if err != nil {
+			http.Error(w, "template not found", http.StatusInternalServerError)
+			return
+		}
+		// The batch is oldest-first (cursor correctness); the fragment is
+		// rendered newest-first so the client can prepend it as one block.
+		for i := len(submissions) - 1; i >= 0; i-- {
+			sub := submissions[i]
+			if sub.ID > latest {
+				latest = sub.ID
+			}
+			card := map[string]interface{}{
+				"S":           sub,
+				"CSRFToken":   r.Context().Value(ctxKeyCSRF),
+				"AdminPrefix": s.adminPrefix,
+			}
+			if err := tpl.Execute(&buf, card); err != nil {
+				log.Printf("poll card render error: %v", err)
+				http.Error(w, "template error", http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"latest": latest,
+		"html":   buf.String(),
+		// A full batch means the backlog may extend past this cursor; the
+		// client follows up immediately instead of waiting an interval.
+		"more": len(submissions) == defaultItemsPerPage,
+	}); err != nil {
+		log.Printf("poll encode error: %v", err)
+	}
 }
 
 func (s *server) handleArchived(w http.ResponseWriter, r *http.Request) {
@@ -1377,6 +1751,12 @@ func (s *server) handleArchived(w http.ResponseWriter, r *http.Request) {
 	submissions, total, err := s.listSubmissions(r.Context(), "archived", page, defaultItemsPerPage, false)
 	if err != nil {
 		log.Printf("list archived submissions error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.attachSentReplies(r.Context(), submissions); err != nil {
+		log.Printf("attach sent replies error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
@@ -1559,12 +1939,53 @@ func (s *server) updateStatus(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, s.adminReferer(r, s.adminPath("/")), http.StatusSeeOther)
 }
 
+// listSubmissionsAfter returns up to limit submissions with id > after,
+// OLDEST first, honoring the dashboard's status filter (archived is always
+// excluded — the live view never shows archived items). Ascending order
+// matters: the poll cursor advances to the max id of the returned batch, so
+// walking the backlog from the low end guarantees no id is ever skipped when
+// more than one batch arrived between polls — the next poll picks up where
+// this one stopped.
+func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status string, limit int) ([]Submission, error) {
+	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, sub.email_unresolvable, c.name, c.email
+	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id
+	    WHERE sub.id > $1`
+	args := []interface{}{after}
+	if status != "" {
+		query += " AND sub.status = $2"
+		args = append(args, status)
+	} else {
+		query += " AND sub.status <> 'archived'"
+	}
+	query += " ORDER BY sub.id ASC LIMIT $" + strconv.Itoa(len(args)+1)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	submissions := []Submission{}
+	for rows.Next() {
+		var sub Submission
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.EmailUnresolvable, &sub.CustomerName, &sub.CustomerEmail); err != nil {
+			return nil, err
+		}
+		sub.FormPretty = formatJSON(sub.FormData)
+		sub.Fields = extractFields(sub.FormData)
+		submissions = append(submissions, sub)
+	}
+	return submissions, rows.Err()
+}
+
 func (s *server) listSubmissions(ctx context.Context, status string, page, pageSize int, excludeArchived bool) ([]Submission, int, error) {
 	offset := (page - 1) * pageSize
 
 	args := []interface{}{}
 	query := `SELECT sub.id, sub.submitted_at, sub.ip_address, sub.forwarded_for, sub.user_agent, sub.referer,
-	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, c.name, c.email
+	    sub.status, sub.file_path, sub.comment, sub.form_data, sub.customer_id, sub.email_unresolvable, c.name, c.email
 	    FROM submissions sub LEFT JOIN customers c ON c.id = sub.customer_id`
 	countQuery := `SELECT COUNT(*) FROM submissions sub`
 
@@ -1594,7 +2015,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 	submissions := []Submission{}
 	for rows.Next() {
 		var sub Submission
-		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.CustomerName, &sub.CustomerEmail); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.SubmittedAt, &sub.IP, &sub.ForwardedFor, &sub.UserAgent, &sub.Referer, &sub.Status, &sub.FilePath, &sub.Comment, &sub.FormData, &sub.CustomerID, &sub.EmailUnresolvable, &sub.CustomerName, &sub.CustomerEmail); err != nil {
 			return nil, 0, err
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
@@ -1646,9 +2067,29 @@ func (s *server) linkCustomer(ctx context.Context, payload map[string]interface{
 	return sql.NullInt64{Int64: id, Valid: true}
 }
 
+var emailFieldKeys = []string{"email", "e-mail", "email_address", "emailaddress", "your_email"}
+
+// emailFieldPresent reports whether any recognized email field in the
+// payload was filled in at all. Combined with extractContact returning no
+// usable address, it distinguishes "no email supplied" from "an email was
+// supplied but nothing parseable", so intake can flag the latter.
+func emailFieldPresent(payload map[string]interface{}) bool {
+	for k, v := range payload {
+		key := strings.ToLower(strings.TrimSpace(k))
+		for _, want := range emailFieldKeys {
+			if key == want && strings.TrimSpace(stringifyValue(v)) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // extractContact pulls contact details from an arbitrary form payload using
-// case-insensitive matching on common field names. Email must look like an
-// address (contain "@") and is lower-cased so records dedupe consistently.
+// case-insensitive matching on common field names. The email is the first
+// field IN PRIORITY ORDER whose value survives sanitizeEmail (a parseable
+// bare address, lower-cased so records dedupe consistently) — junk in the
+// primary field never shadows a valid address in a fallback field.
 func extractContact(payload map[string]interface{}) (email, name, company, phone, address string) {
 	normalized := make(map[string]string, len(payload))
 	for k, v := range payload {
@@ -1663,7 +2104,12 @@ func extractContact(payload map[string]interface{}) (email, name, company, phone
 		return ""
 	}
 
-	email, _ = sanitizeEmail(pick("email", "e-mail", "email_address", "emailaddress", "your_email"))
+	for _, key := range emailFieldKeys {
+		if addr, ok := sanitizeEmail(normalized[key]); ok {
+			email = addr
+			break
+		}
+	}
 	name = pick("name", "full_name", "fullname", "your_name", "contact_name")
 	if name == "" {
 		first := pick("first_name", "firstname", "fname")
@@ -1935,17 +2381,60 @@ func (s *server) handleCustomerView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.attachSentReplies(r.Context(), subs); err != nil {
+		log.Printf("customer attach sent replies error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	sentEmails, err := s.customerSentEmails(r.Context(), id)
+	if err != nil {
+		log.Printf("customer sent emails error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	// ?re=<submission id> arrives from a card's reply chip: thread the
+	// composed message under that received message and prefill the subject.
+	// Inbound email replies carry their title in _reply_subject; form posts
+	// may have a plain subject field.
+	var reID int64
+	var reSubject string
+	if reStr := r.URL.Query().Get("re"); reStr != "" {
+		if n, err := strconv.ParseInt(reStr, 10, 64); err == nil && n > 0 {
+			var subj sql.NullString
+			if err := s.db.QueryRowContext(r.Context(),
+				`SELECT COALESCE(NULLIF(form_data->>'_reply_subject', ''), form_data->>'subject')
+				 FROM submissions WHERE id=$1 AND customer_id=$2`,
+				n, id).Scan(&subj); err == nil {
+				reID = n
+				if t := strings.TrimSpace(subj.String); t != "" {
+					if !strings.HasPrefix(strings.ToLower(t), "re:") {
+						t = "Re: " + t
+					}
+					reSubject = t
+				}
+			}
+		}
+	}
+
 	data := map[string]interface{}{
-		"Customer":    customer,
-		"Submissions": subs,
-		"Timeline":    timeline,
-		"TagChips":    chips,
-		"AllTags":     allTags,
-		"Clicks":      clicks,
-		"MemberOf":    memberOf,
-		"Flash":       mapCustomerFlash(r.URL.Query().Get("saved")),
-		"CSRFToken":   r.Context().Value(ctxKeyCSRF),
-		"AdminPrefix": s.adminPrefix,
+		"Customer":       customer,
+		"Submissions":    subs,
+		"SentEmails":     sentEmails,
+		"ReID":           reID,
+		"ReSubject":      reSubject,
+		"Timeline":       timeline,
+		"TagChips":       chips,
+		"AllTags":        allTags,
+		"Clicks":         clicks,
+		"MemberOf":       memberOf,
+		"Flash":          mapCustomerFlash(r.URL.Query().Get("saved")),
+		"CSRFToken":      r.Context().Value(ctxKeyCSRF),
+		"AdminPrefix":    s.adminPrefix,
+		"SMTPConfigured": s.smtpConfigured(),
+		"MailFrom":       s.mailFrom,
+		"ReplyTo":        s.replyTo,
 	}
 	renderTemplate(w, "templates/customer.html", data)
 }
@@ -2016,6 +2505,18 @@ func mapCustomerFlash(code string) *passwordFlash {
 		return &passwordFlash{Message: "Customer saved.", Kind: "success"}
 	case "err":
 		return &passwordFlash{Message: "Could not save — is that email already used by another customer?", Kind: "error"}
+	case "mailsent":
+		return &passwordFlash{Message: "Email sent and logged on the timeline.", Kind: "success"}
+	case "mailfail":
+		return &passwordFlash{Message: "Sending failed — check the SMTP relay and the daemon log.", Kind: "error"}
+	case "mailrecfail":
+		return &passwordFlash{Message: "The email WAS sent, but recording it failed — the timeline and outgoing list are missing this message. Do not resend; check the daemon log.", Kind: "warning"}
+	case "mailempty":
+		return &passwordFlash{Message: "Subject and body are both required.", Kind: "error"}
+	case "mailbad":
+		return &passwordFlash{Message: "This customer has no valid email address.", Kind: "error"}
+	case "nosmtp":
+		return &passwordFlash{Message: "SMTP is not configured — set smtp_host and mail_from in ftd.conf.", Kind: "error"}
 	default:
 		return nil
 	}
@@ -2126,18 +2627,38 @@ func (s *server) adminPath(suffix string) string {
 	return s.adminPrefix + "/" + suffix
 }
 
-func renderTemplate(w http.ResponseWriter, path string, data interface{}) {
-	funcMap := template.FuncMap{
+// submissionCardTemplate is the shared partial for one submission card,
+// rendered inline by the dashboard and as a fragment by the live-update poll
+// endpoint.
+const submissionCardTemplate = "templates/submission_card.html"
+
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
 		"add":      func(a, b int) int { return a + b },
 		"subtract": func(a, b int) int { return a - b },
 		"multiply": func(a, b int) int { return a * b },
+		// cardCtx bundles one submission with the page-level values the card
+		// partial needs ({{template}} can only pass a single argument).
+		"cardCtx": func(sub Submission, root map[string]interface{}) map[string]interface{} {
+			return map[string]interface{}{
+				"S":           sub,
+				"CSRFToken":   root["CSRFToken"],
+				"AdminPrefix": root["AdminPrefix"],
+			}
+		},
 	}
+}
 
+func renderTemplate(w http.ResponseWriter, path string, data interface{}) {
 	// Name the template after the file's base name so that ParseFS associates the
 	// parsed content with this template (ParseFS names templates by base name).
 	// Otherwise Execute would run an empty template and fail.
 	name := filepath.Base(path)
-	tpl, err := template.New(name).Funcs(funcMap).ParseFS(embeddedFS, path)
+	patterns := []string{path}
+	if path != submissionCardTemplate {
+		patterns = append(patterns, submissionCardTemplate)
+	}
+	tpl, err := template.New(name).Funcs(templateFuncs()).ParseFS(embeddedFS, patterns...)
 	if err != nil {
 		http.Error(w, "template not found", http.StatusInternalServerError)
 		return

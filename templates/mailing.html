@@ -17,7 +17,13 @@
       </div>
       <div class="actions">
         <nav class="tabs">
-          <a href="{{.AdminPrefix}}/mailings">← Mailings</a>
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
+          <a href="{{.AdminPrefix}}/customers">Customers</a>
+          <a href="{{.AdminPrefix}}/tags">Tags</a>
+          <a href="{{.AdminPrefix}}/lists">Lists</a>
+          <a href="{{.AdminPrefix}}/mailings" class="active">Mailings</a>
+          <a href="{{.AdminPrefix}}/users">Users</a>
         </nav>
         <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
       </div>
@@ -29,10 +35,10 @@
 
     {{if eq .Mailing.Status "draft"}}
     {{if not .SMTPConfigured}}
-    <div class="alert warning">SMTP is not configured — set <code>SMTP_HOST</code> and <code>MAIL_FROM</code> before sending.</div>
+    <div class="alert warning">SMTP is not configured — set <code>smtp_host</code> and <code>mail_from</code> before sending.</div>
     {{end}}
     {{if not .TrackingEnabled}}
-    <div class="alert warning">Set <code>PUBLIC_BASE_URL</code> to enable open tracking and unsubscribe links in outgoing mail.</div>
+    <div class="alert warning">Set <code>public_base_url</code> to enable open tracking and unsubscribe links in outgoing mail.</div>
     {{end}}
 
     <section class="compose-card">
@@ -54,20 +60,9 @@
             <span class="editor-label">Body</span>
             <button type="button" id="raw-toggle" class="raw-btn" hidden>HTML source</button>
           </div>
-          <div id="editor-toolbar" class="editor-toolbar" hidden>
-            <button type="button" data-cmd="bold" title="Bold"><b>B</b></button>
-            <button type="button" data-cmd="italic" title="Italic"><i>I</i></button>
-            <button type="button" data-cmd="underline" title="Underline"><u>U</u></button>
-            <button type="button" data-cmd="h2" title="Heading">H2</button>
-            <button type="button" data-cmd="p" title="Paragraph">&para;</button>
-            <button type="button" data-cmd="insertUnorderedList" title="Bullet list">&bull; List</button>
-            <button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button>
-            <button type="button" data-cmd="link" title="Insert link">Link</button>
-            <button type="button" data-cmd="image" title="Insert image by URL">Image</button>
-            <button type="button" data-cmd="cta" title="Insert call-to-action button">CTA</button>
-            <button type="button" data-cmd="insertHorizontalRule" title="Divider">&#8213;</button>
-            <button type="button" data-cmd="removeFormat" title="Clear formatting">Clear</button>
-          </div>
+          {{/* Toolbar contents are built by editor.js — one source of truth
+               for every page that embeds the editor. */}}
+          <div id="editor-toolbar" class="editor-toolbar" hidden></div>
           <div id="rich-editor" class="rich-editor" contenteditable="true" hidden></div>
           <textarea name="body_html" id="body-html" rows="14" class="raw-area" placeholder="&lt;p&gt;Hello!&lt;/p&gt;">{{.Mailing.BodyHTML}}</textarea>
         </div>

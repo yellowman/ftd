@@ -16,6 +16,7 @@
       <div class="actions">
         <nav class="tabs">
           <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
           <a href="{{.AdminPrefix}}/customers">Customers</a>
           <a href="{{.AdminPrefix}}/tags" class="active">Tags</a>
           <a href="{{.AdminPrefix}}/lists">Lists</a>
@@ -29,19 +30,6 @@
     {{with .Flash}}
     <div class="alert {{.Kind}}">{{.Message}}</div>
     {{end}}
-
-    <section class="password-card">
-      <div>
-        <h2>New tag</h2>
-        <p>Pre-create vocabulary so forms and teammates converge on the same names.</p>
-      </div>
-      <form method="post" action="{{.AdminPrefix}}/tags">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <input type="hidden" name="action" value="create">
-        <label>Name<input type="text" name="name" placeholder="widgets" required></label>
-        <button type="submit">Create tag</button>
-      </form>
-    </section>
 
     <section class="customers">
       {{if not .Tags}}
@@ -69,6 +57,22 @@
       </table>
       {{end}}
     </section>
+
+    <details class="tools">
+      <summary>New tag</summary>
+      <section class="password-card">
+        <div>
+          <h2>New tag</h2>
+          <p>Pre-create vocabulary so forms and teammates converge on the same names.</p>
+        </div>
+        <form method="post" action="{{.AdminPrefix}}/tags">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="action" value="create">
+          <label>Name<input type="text" name="name" placeholder="widgets" required></label>
+          <button type="submit">Create tag</button>
+        </form>
+      </section>
+    </details>
   </div>
 </body>
 </html>

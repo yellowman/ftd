@@ -18,7 +18,13 @@
       </div>
       <div class="actions">
         <nav class="tabs">
-          <a href="{{.AdminPrefix}}/customers">← Customers</a>
+          <a href="{{.AdminPrefix}}/">Active</a>
+          <a href="{{.AdminPrefix}}/archived">Archived</a>
+          <a href="{{.AdminPrefix}}/customers" class="active">Customers</a>
+          <a href="{{.AdminPrefix}}/tags">Tags</a>
+          <a href="{{.AdminPrefix}}/lists">Lists</a>
+          <a href="{{.AdminPrefix}}/mailings">Mailings</a>
+          <a href="{{.AdminPrefix}}/users">Users</a>
         </nav>
         <a class="logout" href="{{.AdminPrefix}}/logout">Logout</a>
       </div>
@@ -102,6 +108,44 @@
     </section>
     {{end}}
 
+    <section class="compose-card" id="compose">
+      {{if not .Customer.Email.Valid}}
+      <div>
+        <h2>Send email</h2>
+        <p>Add an email address to this record to compose a reply from here.</p>
+      </div>
+      {{else if not .SMTPConfigured}}
+      <div>
+        <h2>Send email</h2>
+        <p>SMTP is not configured — set <code>smtp_host</code> and <code>mail_from</code> in ftd.conf to compose replies from here.</p>
+      </div>
+      {{else}}
+      <form method="post" action="{{.AdminPrefix}}/customers/email" id="compose-form">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="id" value="{{.Customer.ID}}">
+        {{if .ReID}}<input type="hidden" name="submission_id" value="{{.ReID}}">{{end}}
+        <div class="full">
+          <h2>Send email{{if .ReID}} — in reply to #{{.ReID}}{{end}}</h2>
+          {{if .ReID}}<p class="hint">The sent message will be attached under submission #{{.ReID}} in the inbox.</p>{{end}}
+          <p class="hint">To <strong>{{.Customer.Email.String}}</strong> · from {{.MailFrom}}{{if .ReplyTo}} · replies come back to the inbox via {{.ReplyTo}}{{end}} · personal mail: no tracking, no unsubscribe footer · logged on the timeline{{if .Customer.UnsubscribedAt.Valid}} · <strong>note:</strong> this customer unsubscribed from mailings — direct replies are still delivered{{end}}</p>
+        </div>
+        <label class="full">Subject<input type="text" name="subject" value="{{.ReSubject}}" required maxlength="300"></label>
+        <div class="full" id="editor-wrap">
+          <div class="editor-head">
+            <span class="editor-label">Body</span>
+            <button type="button" id="raw-toggle" class="raw-btn" hidden>HTML source</button>
+          </div>
+          <div id="editor-toolbar" class="editor-toolbar" hidden></div>
+          <div id="rich-editor" class="rich-editor" contenteditable="true" hidden></div>
+          <textarea name="body_html" id="body-html" rows="10" class="raw-area" placeholder="&lt;p&gt;Hello!&lt;/p&gt;"></textarea>
+        </div>
+        <div class="send-form">
+          <button type="submit" class="send">Send email</button>
+        </div>
+      </form>
+      {{end}}
+    </section>
+
     <section class="password-card">
       <div>
         <h2>Log activity</h2>
@@ -167,11 +211,14 @@
       <p>No submissions linked to this customer.</p>
       {{else}}
       {{range .Submissions}}
-      <div class="card {{.Status}}">
+      <div class="card {{.Status}}" id="sub-{{.ID}}">
         <div class="meta">
           <div class="meta-top">
             <span class="id-pill">#{{.ID}}</span>
-            <span class="status-pill {{.Status}}">{{.Status}}</span>
+            <span class="meta-top-links">
+              <a class="assoc" href="{{$.AdminPrefix}}/customers/view?id={{$.Customer.ID}}&re={{.ID}}#compose" title="Compose a reply — it will be attached under this message">&#9993; reply</a>
+              <span class="status-pill {{.Status}}">{{.Status}}</span>
+            </span>
           </div>
           <div class="meta-bottom">
             <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
@@ -189,10 +236,35 @@
         </dl>
         {{end}}
         {{if .Comment.Valid}}<p class="hint">Note: {{.Comment.String}}</p>{{end}}
+        {{if .SentReplies}}
+        <div class="sent-replies">
+          {{range .SentReplies}}
+          <details class="sent-reply">
+            <summary>&#8617; replied {{.SentAt.Format "2006-01-02 15:04"}}{{with .SentBy.String}} by {{.}}{{end}} &middot; {{.Subject}}</summary>
+            <pre class="sent-body">{{.BodyText}}</pre>
+          </details>
+          {{end}}
+        </div>
+        {{end}}
       </div>
       {{end}}
       {{end}}
     </section>
+
+    {{if .SentEmails}}
+    <section class="customers">
+      <h2>Outgoing email ({{len .SentEmails}})</h2>
+      <div class="sent-list">
+        {{range .SentEmails}}
+        <details class="sent-reply">
+          <summary>{{.SentAt.Format "2006-01-02 15:04"}} &middot; {{.Subject}} &middot; to {{.ToEmail}}{{with .SentBy.String}} &middot; by {{.}}{{end}}{{if .SubmissionID.Valid}} &middot; <a href="#sub-{{.SubmissionID.Int64}}">reply to #{{.SubmissionID.Int64}}</a>{{end}}</summary>
+          <pre class="sent-body">{{.BodyText}}</pre>
+        </details>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
   </div>
+  <script src="{{.AdminPrefix}}/static/editor.js"></script>
 </body>
 </html>

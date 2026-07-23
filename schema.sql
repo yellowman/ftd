@@ -8,13 +8,19 @@ CREATE TABLE IF NOT EXISTS submissions (
     status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','in_progress','complete','archived')),
     file_path TEXT,
     comment TEXT,
-    form_data JSONB NOT NULL
+    form_data JSONB NOT NULL,
+    -- Set at intake when the supplied email cannot receive mail: the address
+    -- or domain is syntactically impossible, or the domain has no MX or
+    -- A/AAAA record (authoritative NXDOMAIN/NODATA or RFC 7505 null MX).
+    -- Transient DNS failures never set it.
+    email_unresolvable BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Backfill columns on databases created before they were introduced, so that
 -- re-running this script is sufficient to migrate an existing install.
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS forwarded_for TEXT;
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS customer_id INTEGER;
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS email_unresolvable BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS submissions_status_submitted_at_idx
     ON submissions (status, submitted_at DESC);
@@ -138,6 +144,25 @@ CREATE TABLE IF NOT EXISTS activities (
 );
 
 CREATE INDEX IF NOT EXISTS activities_customer_idx ON activities (customer_id, created_at DESC);
+
+-- Full record of operator-composed emails (the customer-page Send email
+-- composer). submission_id links a reply to the received message it answers;
+-- SET NULL keeps the sent record as plain outgoing mail if that submission
+-- is later deleted.
+CREATE TABLE IF NOT EXISTS sent_emails (
+    id SERIAL PRIMARY KEY,
+    customer_id INTEGER REFERENCES customers (id) ON DELETE CASCADE,
+    submission_id INTEGER REFERENCES submissions (id) ON DELETE SET NULL,
+    to_email TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body_html TEXT NOT NULL,
+    body_text TEXT NOT NULL,
+    sent_by TEXT,
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS sent_emails_customer_idx ON sent_emails (customer_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS sent_emails_submission_idx ON sent_emails (submission_id);
 
 -- Reply ingestion idempotency: the MTA retries deliveries after a lost
 -- acknowledgment, so replies are deduplicated on their Message-ID (or a
