@@ -91,8 +91,19 @@
     if (empty) empty.remove();
     var tmp = document.createElement("div");
     tmp.innerHTML = html;
+    // Dedupe by submission id: the page render and the first poll can
+    // legitimately overlap (a row inserted while the dashboard was being
+    // built appears in both), and dropping the copy here is what makes that
+    // overlap harmless.
     var cards = tmp.querySelectorAll(".card");
-    for (var i = 0; i < cards.length; i++) cards[i].classList.add("live-new");
+    for (var i = 0; i < cards.length; i++) {
+      var sid = cards[i].getAttribute("data-submission-id");
+      if (sid && section.querySelector('.card[data-submission-id="' + sid + '"]')) {
+        cards[i].remove();
+      } else {
+        cards[i].classList.add("live-new");
+      }
+    }
     // Fragment is newest-first; inserting from the last child up keeps that
     // order once everything sits above the existing cards.
     while (tmp.lastElementChild) {

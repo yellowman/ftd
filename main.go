@@ -1433,6 +1433,18 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-update cursor, taken BEFORE the list query. A row inserted between
+	// the two queries then appears both in the rendered page and in the first
+	// poll (id > cursor) — a duplicate the client deduplicates by submission
+	// id. The reverse order would instead skip such a row entirely: absent
+	// from the HTML yet inside the cursor, invisible until a full reload.
+	var latestID int64
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COALESCE(MAX(id), 0) FROM submissions").Scan(&latestID); err != nil {
+		log.Printf("latest submission id error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	submissions, total, err := s.listSubmissions(r.Context(), statusFilter, page, defaultItemsPerPage, true)
 	if err != nil {
 		log.Printf("list submissions error: %v", err)
@@ -1453,17 +1465,6 @@ func (s *server) renderDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	flash := mapPasswordFlash(r.URL.Query().Get("pw"))
-
-	// Live-update cursor: the highest submission id in the whole table (not
-	// just the filtered page), so the poll endpoint only ever surfaces
-	// genuinely new arrivals. Live updates run on page 1 only; deeper pages
-	// are a historical view.
-	var latestID int64
-	if err := s.db.QueryRowContext(r.Context(), "SELECT COALESCE(MAX(id), 0) FROM submissions").Scan(&latestID); err != nil {
-		log.Printf("latest submission id error: %v", err)
-		http.Error(w, "server error", http.StatusInternalServerError)
-		return
-	}
 
 	var invalidCount int
 	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM submissions WHERE email_unresolvable").Scan(&invalidCount); err != nil {
