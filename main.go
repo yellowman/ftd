@@ -753,10 +753,10 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	// to earn the flag: the field doesn't even parse as an address, or it
 	// parses but the domain fails syntax/DNS (MX, else A/AAAA) checks.
 	emailUnresolvable := false
-	if raw := rawEmailField(payload); raw != "" {
+	if emailFieldPresent(payload) {
 		email, _, _, _, _ := extractContact(payload)
 		if email == "" {
-			emailUnresolvable = true // supplied, but not a parseable address
+			emailUnresolvable = true // supplied, but nothing parseable in any email field
 		} else if s.emailCheck.verdict(r.Context(), email) == emailInvalid {
 			emailUnresolvable = true
 		}
@@ -2069,29 +2069,27 @@ func (s *server) linkCustomer(ctx context.Context, payload map[string]interface{
 
 var emailFieldKeys = []string{"email", "e-mail", "email_address", "emailaddress", "your_email"}
 
-// rawEmailField returns the untouched value of the first recognized email
-// field in a payload — empty when no such field was filled in. Unlike
-// extractContact's sanitized result, this distinguishes "no email supplied"
-// from "an email was supplied but it doesn't even parse", so intake can flag
-// the latter as undeliverable.
-func rawEmailField(payload map[string]interface{}) string {
+// emailFieldPresent reports whether any recognized email field in the
+// payload was filled in at all. Combined with extractContact returning no
+// usable address, it distinguishes "no email supplied" from "an email was
+// supplied but nothing parseable", so intake can flag the latter.
+func emailFieldPresent(payload map[string]interface{}) bool {
 	for k, v := range payload {
 		key := strings.ToLower(strings.TrimSpace(k))
 		for _, want := range emailFieldKeys {
-			if key == want {
-				if val := strings.TrimSpace(stringifyValue(v)); val != "" {
-					return val
-				}
+			if key == want && strings.TrimSpace(stringifyValue(v)) != "" {
+				return true
 			}
 		}
 	}
-	return ""
+	return false
 }
 
 // extractContact pulls contact details from an arbitrary form payload using
-// case-insensitive matching on common field names. Email must survive
-// sanitizeEmail (a parseable bare address) and is lower-cased so records
-// dedupe consistently.
+// case-insensitive matching on common field names. The email is the first
+// field IN PRIORITY ORDER whose value survives sanitizeEmail (a parseable
+// bare address, lower-cased so records dedupe consistently) — junk in the
+// primary field never shadows a valid address in a fallback field.
 func extractContact(payload map[string]interface{}) (email, name, company, phone, address string) {
 	normalized := make(map[string]string, len(payload))
 	for k, v := range payload {
@@ -2106,7 +2104,12 @@ func extractContact(payload map[string]interface{}) (email, name, company, phone
 		return ""
 	}
 
-	email, _ = sanitizeEmail(pick(emailFieldKeys...))
+	for _, key := range emailFieldKeys {
+		if addr, ok := sanitizeEmail(normalized[key]); ok {
+			email = addr
+			break
+		}
+	}
 	name = pick("name", "full_name", "fullname", "your_name", "contact_name")
 	if name == "" {
 		first := pick("first_name", "firstname", "fname")
