@@ -1,4 +1,6 @@
-/* ftd admin — precise, dense, flat. One accent, quiet chrome, data first.
+/* ftd admin — precise, calm, quietly dimensional. One accent, quiet chrome,
+   data first: panels get a hairline and a whisper of shadow, status reads
+   from tinted chips, and nothing is painted that isn't information.
    Pure CSS, no JS, served same-origin (CSP-safe).
 
    Layout is deliberately rigid: the nav sits at the same pixel on every page,
@@ -7,21 +9,26 @@
 
 :root {
   color-scheme: dark;
-  --bg: #0b0c0e;
-  --panel: #111214;
-  --panel-2: #16181b;
-  --line: #24262a;
-  --line-strong: #33363c;
-  --text: #d4d7dc;
-  --muted: #85898f;
-  --faint: #5c6066;
+  --bg: #0a0b0d;
+  --panel: #121417;
+  --panel-2: #191c20;
+  --inset: #0d0e11; /* recessed wells inside panels: field lists, raw JSON, inputs */
+  --line: #23262b;
+  --line-strong: #34383f;
+  --text: #d8dbe0;
+  --muted: #8b9097;
+  --faint: #5f646b;
   --accent: #d19a3d;
+  --accent-bright: #e0ad52;
   --accent-dim: #6b5223;
   --good: #79b791;
   --warn: #c9a35e;
   --bad: #c97a7a;
   --mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
-  --radius: 3px;
+  --radius: 6px;    /* panels and cards */
+  --radius-sm: 4px; /* controls and inner wells */
+  /* A hint of lift on raised surfaces; barely-there on purpose. */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 6px 20px -12px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }
@@ -31,39 +38,47 @@ html { overflow-y: scroll; }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  font-size: 13.5px;
-  line-height: 1.45;
+  font-size: 14px;
+  line-height: 1.5;
   background: var(--bg);
   color: var(--text);
   margin: 0;
   padding: 0;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Interactive chrome eases between states instead of snapping; the
+   reduced-motion block at the bottom turns this off wholesale. */
+a, button, input, select, textarea, .card, .status-pill, .tag-chip, .assoc {
+  transition: color 0.12s ease, background-color 0.12s ease,
+              border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .container {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 0 1.25rem 3rem;
+  padding: 0 1.5rem 4rem;
 }
 
 /* ---------- header: identical geometry on every page ---------- */
 
 .header {
   display: block;
-  margin: 0 0 1.25rem;
+  margin: 0 0 1.6rem;
 }
 
 .header > div:first-child {
-  padding: 0.9rem 0 0;
-  min-height: 3.1rem;
+  padding: 1.15rem 0 0;
+  min-height: 3.4rem;
 }
 
 .header h1 {
   display: inline;
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 600;
-  letter-spacing: 0;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 
@@ -83,12 +98,12 @@ body {
 
 .actions {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.9rem;
   align-items: center;
   flex-wrap: wrap;
   border-bottom: 1px solid var(--line);
   padding-bottom: 0;
-  margin-top: 0.5rem;
+  margin-top: 0.65rem;
 }
 
 /* Tabs come first in the row, so the nav is at the same position everywhere. */
@@ -102,7 +117,7 @@ body {
 }
 
 .tabs a {
-  padding: 0.45rem 0.7rem 0.5rem;
+  padding: 0.55rem 0.8rem 0.6rem;
   text-decoration: none;
   color: var(--muted);
   font-weight: 500;
@@ -171,14 +186,14 @@ body {
 
 /* ---------- alerts ---------- */
 
+/* Tinted panel, no edge stripe: the wash of color carries the severity. */
 .alert {
-  padding: 0.55rem 0.8rem;
-  border-radius: var(--radius);
-  margin: 0 0 0.9rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius-sm);
+  margin: 0 0 1rem;
   font-weight: 400;
   font-size: 0.85rem;
   border: 1px solid var(--line);
-  border-left-width: 3px;
   background: var(--panel);
 }
 
@@ -190,9 +205,9 @@ body {
   border-radius: 2px;
 }
 
-.alert.warning { color: var(--warn); border-left-color: var(--warn); }
-.alert.success { color: var(--good); border-left-color: var(--good); }
-.alert.error   { color: var(--bad);  border-left-color: var(--bad); }
+.alert.warning { color: var(--warn); border-color: rgba(201, 163, 94, 0.35);  background: rgba(201, 163, 94, 0.07); }
+.alert.success { color: var(--good); border-color: rgba(121, 183, 145, 0.35); background: rgba(121, 183, 145, 0.07); }
+.alert.error   { color: var(--bad);  border-color: rgba(201, 122, 122, 0.35); background: rgba(201, 122, 122, 0.07); }
 
 /* ---------- form cards ---------- */
 
@@ -200,12 +215,13 @@ body {
 .compose-card {
   display: grid;
   grid-template-columns: 1fr 1.6fr;
-  gap: 1rem;
+  gap: 1.2rem;
   align-items: start;
-  padding: 0.9rem 1rem;
+  padding: 1.1rem 1.2rem;
   border-radius: var(--radius);
   border: 1px solid var(--line);
   background: var(--panel);
+  box-shadow: var(--shadow);
   margin-bottom: 1rem;
 }
 
@@ -234,7 +250,7 @@ body {
 /* The account form is rarely needed: collapsed at the bottom of the page.
    The rule above the first one mirrors the header's bottom border, so the
    page's chrome is visually separated from content at both ends. */
-details.tools { margin-top: 2rem; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+details.tools { margin-top: 2.5rem; border-top: 1px solid var(--line); padding-top: 0.65rem; }
 details.tools + details.tools { margin-top: 0.25rem; border-top: none; padding-top: 0; }
 
 details.tools > summary {
@@ -259,19 +275,19 @@ label {
 }
 
 input, select, textarea, button {
-  padding: 0.38rem 0.55rem;
+  padding: 0.4rem 0.6rem;
   font-size: 0.85rem;
   font-family: inherit;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--line-strong);
-  background: var(--bg);
+  background: var(--inset);
   color: var(--text);
 }
 
 input:focus, select:focus, textarea:focus {
   outline: none;
   border-color: var(--accent-dim);
-  box-shadow: 0 0 0 1px var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(209, 154, 61, 0.12);
 }
 
 button {
@@ -284,9 +300,21 @@ button {
   justify-self: start;
 }
 
-button:hover { border-color: var(--accent-dim); background: #1a1d21; }
+button:hover { border-color: var(--accent-dim); background: #1e2126; }
 
-button[type="submit"] { border-color: var(--accent-dim); }
+/* The one primary action per context reads amber without being a wall of
+   filled buttons: accent text and border, a wash on hover. */
+button[type="submit"] {
+  color: var(--accent);
+  border-color: rgba(209, 154, 61, 0.45);
+  background: rgba(209, 154, 61, 0.06);
+}
+
+button[type="submit"]:hover {
+  color: var(--accent-bright);
+  border-color: var(--accent);
+  background: rgba(209, 154, 61, 0.12);
+}
 
 button.danger {
   background: none;
@@ -321,36 +349,37 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
 .submissions {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.9rem;
 }
 
 .empty-note { color: var(--faint); }
 
+/* Uniform hairline all round — status lives in the pill, not a painted edge.
+   A whisper of lift and a border that wakes up under the pointer. */
 .card {
   border: 1px solid var(--line);
-  border-left-width: 3px;
   border-radius: var(--radius);
-  padding: 0.7rem 0.9rem;
+  padding: 0.95rem 1.1rem 1rem;
   background: var(--panel);
+  box-shadow: var(--shadow);
 }
 
-.card.new         { border-left-color: var(--text); }
-.card.in_progress { border-left-color: var(--warn); }
-.card.complete    { border-left-color: var(--good); }
-.card.archived    { border-left-color: var(--faint); opacity: 0.75; }
+.card:hover { border-color: var(--line-strong); }
 
-.meta { margin-bottom: 0.5rem; }
+.card.archived { opacity: 0.75; }
+
+.meta { margin-bottom: 0.65rem; }
 
 .meta-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 0.3rem;
+  margin-bottom: 0.4rem;
 }
 
 .id-pill {
   background: none;
-  color: var(--faint);
+  color: var(--muted);
   font-family: var(--mono);
   font-weight: 400;
   font-size: 0.8rem;
@@ -358,27 +387,28 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
   border-radius: 0;
 }
 
+/* Tinted chips: a wash of the status color behind mono capitals. */
 .status-pill {
   text-transform: uppercase;
   font-family: var(--mono);
   font-size: 0.68rem;
-  letter-spacing: 0.06em;
-  padding: 0.1rem 0.4rem;
-  border-radius: 2px;
+  letter-spacing: 0.07em;
+  padding: 0.14rem 0.5rem;
+  border-radius: 3px;
   font-weight: 400;
-  background: none;
-  border: 1px solid var(--line-strong);
+  background: rgba(139, 144, 151, 0.1);
+  border: 1px solid transparent;
   color: var(--muted);
 }
 
-.status-pill.new         { color: var(--text); border-color: var(--muted); }
-.status-pill.in_progress { color: var(--warn); border-color: rgba(201, 163, 94, 0.4); }
-.status-pill.complete    { color: var(--good); border-color: rgba(121, 183, 145, 0.4); }
-.status-pill.archived    { color: var(--faint); }
+.status-pill.new         { color: var(--text);  background: rgba(216, 219, 224, 0.1); }
+.status-pill.in_progress { color: var(--warn);  background: rgba(201, 163, 94, 0.12); }
+.status-pill.complete    { color: var(--good);  background: rgba(121, 183, 145, 0.12); }
+.status-pill.archived    { color: var(--faint); background: rgba(95, 100, 107, 0.12); }
 .status-pill.draft       { color: var(--muted); }
-.status-pill.sending     { color: var(--warn); border-color: rgba(201, 163, 94, 0.4); }
-.status-pill.sent        { color: var(--good); border-color: rgba(121, 183, 145, 0.4); }
-.status-pill.failed      { color: var(--bad); border-color: rgba(201, 122, 122, 0.4); }
+.status-pill.sending     { color: var(--warn);  background: rgba(201, 163, 94, 0.12); }
+.status-pill.sent        { color: var(--good);  background: rgba(121, 183, 145, 0.12); }
+.status-pill.failed      { color: var(--bad);   background: rgba(201, 122, 122, 0.12); }
 
 /* Request metadata: one compact mono strip, labels inline and faint. */
 .meta-bottom {
@@ -414,12 +444,12 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
 .fields {
   display: grid;
   grid-template-columns: minmax(120px, 180px) 1fr;
-  gap: 0.15rem 0.9rem;
-  margin: 0.5rem 0;
-  padding: 0.5rem 0.7rem;
-  background: var(--bg);
+  gap: 0.25rem 1rem;
+  margin: 0.6rem 0;
+  padding: 0.65rem 0.85rem;
+  background: var(--inset);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
 }
 
 .field-row { display: contents; }
@@ -442,12 +472,12 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
 
 /* Raw payload — only rendered when nothing could be decoded. */
 pre.json {
-  background: var(--bg);
+  background: var(--inset);
   color: var(--muted);
-  padding: 0.5rem 0.7rem;
-  margin: 0.5rem 0;
+  padding: 0.65rem 0.85rem;
+  margin: 0.6rem 0;
   overflow-x: auto;
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   font-family: var(--mono);
   font-size: 0.78rem;
   border: 1px solid var(--line);
@@ -464,12 +494,13 @@ pre.json {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow);
   overflow: hidden;
 }
 
 .table th, .table td {
   text-align: left;
-  padding: 0.4rem 0.7rem;
+  padding: 0.5rem 0.85rem;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 0.84rem;
@@ -502,7 +533,7 @@ pre.json {
 /* ---------- misc ---------- */
 
 .pagination {
-  margin-top: 1rem;
+  margin-top: 1.4rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -533,15 +564,23 @@ pre.json {
 .delete-submission { margin: 0 0 0.15rem; }
 
 .status-form {
-  margin-top: 0.5rem;
+  margin-top: 0.65rem;
   display: flex;
-  gap: 0.6rem;
+  gap: 0.7rem;
   align-items: flex-end;
   flex-wrap: wrap;
 }
 
-.status-form label { font-size: 0.72rem; color: var(--faint); }
-.status-form button { padding: 0.3rem 0.8rem; font-size: 0.8rem; }
+/* Micro-caps labels: quiet structure, clearly not data. */
+.status-form label,
+.comment-block label {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+.status-form button { padding: 0.3rem 0.9rem; font-size: 0.8rem; }
 
 .comment-block {
   flex: 1 1 280px;
@@ -551,12 +590,12 @@ pre.json {
   padding: 0;
 }
 
-.comment-block label { display: block; font-weight: 500; font-size: 0.72rem; color: var(--faint); margin-bottom: 0.2rem; }
+.comment-block label { display: block; font-weight: 500; margin-bottom: 0.25rem; }
 
 .comment-block textarea {
   width: 100%;
-  min-height: 30px;
-  height: 30px;
+  min-height: 32px;
+  height: 32px;
   resize: vertical;
   font: inherit;
   font-size: 0.85rem;
@@ -616,7 +655,7 @@ pre.json {
   align-items: center;
   gap: 0.25rem;
   padding: 0.12rem 0.3rem 0.12rem 0.5rem;
-  border-radius: 2px;
+  border-radius: 3px;
   font-family: var(--mono);
   font-size: 0.75rem;
   font-weight: 400;
@@ -822,7 +861,7 @@ pre.json {
   align-items: center;
   gap: 0.25rem;
   padding: 0.1rem 0.4rem;
-  border-radius: 2px;
+  border-radius: 3px;
   font-size: 0.78rem;
   font-weight: 400;
   text-decoration: none;
@@ -878,10 +917,10 @@ details.sent-reply.followup > summary { font-style: italic; }
 
 .sent-body {
   margin: 0.3rem 0 0.4rem;
-  padding: 0.5rem 0.7rem;
-  background: var(--bg);
+  padding: 0.6rem 0.8rem;
+  background: var(--inset);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   font-family: inherit;
   font-size: 0.85rem;
   color: var(--text);
@@ -897,17 +936,17 @@ details.sent-reply.followup > summary { font-style: italic; }
 input:not([type="file"]),
 select,
 button {
-  height: 30px;
+  height: 32px;
 }
 
-textarea { min-height: 30px; }
+textarea { min-height: 32px; }
 
-/* The header row runs compact: every control in it is the same 24px. */
+/* The header row runs compact: every control in it is the same 26px. */
 .filter select,
 .filter button,
 .bulk-archive button,
 button.danger {
-  height: 24px;
+  height: 26px;
 }
 
 /* Micro buttons keep their intrinsic size. */
@@ -956,7 +995,7 @@ button.danger {
    focus leaves the card, or another action gets blocked by the pending edit —
    the card turns red (.unsaved) and stays red until the edit is saved or
    undone. Placed after the status accent rules so the red left edge wins. */
-.card.unsaved { border-color: var(--bad); }
+.card.unsaved { border-color: var(--bad); box-shadow: 0 0 0 3px rgba(201, 122, 122, 0.1); }
 .card.unsaved::before {
   content: "unsaved changes — save or undo them before moving on";
   display: block;
@@ -983,12 +1022,13 @@ input[type="file"] {
 
 /* Login: a small centered panel, nothing else. */
 .login-page {
-  max-width: 300px;
+  max-width: 320px;
   margin-top: 18vh;
-  padding: 1.25rem 1.25rem 1.5rem;
+  padding: 1.5rem 1.5rem 1.75rem;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
 .login-page h1 {
