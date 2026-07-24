@@ -71,6 +71,8 @@
       {{end}}
     </section>
 
+    {{/* Everything fits on one page: no pagination chrome at all. */}}
+    {{if or (gt .Page 1) (lt (multiply .Page .PageSize) .Total)}}
     <footer class="pagination">
       {{if gt .Page 1}}
       <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Status}}&status={{.Status}}{{end}}">Previous</a>
@@ -80,6 +82,7 @@
       <a href="{{.Path}}?page={{add .Page 1}}{{if .Status}}&status={{.Status}}{{end}}">Next</a>
       {{end}}
     </footer>
+    {{end}}
 
     {{if not .IsArchived}}
     <details class="tools"{{if .DefaultPassword}} open{{end}}>
