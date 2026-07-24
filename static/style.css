@@ -231,9 +231,11 @@ body {
 .password-card .full,
 .compose-card .full { grid-column: 1 / -1; }
 
-/* The account form is rarely needed: collapsed at the bottom of the page. */
-details.tools { margin-top: 2rem; }
-details.tools + details.tools { margin-top: 0.25rem; }
+/* The account form is rarely needed: collapsed at the bottom of the page.
+   The rule above the first one mirrors the header's bottom border, so the
+   page's chrome is visually separated from content at both ends. */
+details.tools { margin-top: 2rem; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+details.tools + details.tools { margin-top: 0.25rem; border-top: none; padding-top: 0; }
 
 details.tools > summary {
   cursor: pointer;
@@ -948,6 +950,22 @@ button.danger {
 
 /* Cards inserted by the live-update poll flag themselves briefly. */
 .card.live-new { animation: live-arrive 2s ease-out; }
+
+/* Unsaved comment/status edits. While the operator is still in the card the
+   edit is tracked silently (.dirty); the moment attention moves elsewhere —
+   focus leaves the card, or another action gets blocked by the pending edit —
+   the card turns red (.unsaved) and stays red until the edit is saved or
+   undone. Placed after the status accent rules so the red left edge wins. */
+.card.unsaved { border-color: var(--bad); }
+.card.unsaved::before {
+  content: "unsaved changes — save or undo them before moving on";
+  display: block;
+  color: var(--bad);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  margin-bottom: 0.5rem;
+}
+.card.unsaved .dirty-field { border-color: var(--bad); }
 
 @keyframes live-arrive {
   0%   { background: #201a10; }

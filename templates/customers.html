@@ -73,6 +73,8 @@
       {{end}}
     </section>
 
+    {{/* Everything fits on one page: no pagination chrome at all. */}}
+    {{if or (gt .Page 1) (lt (multiply .Page .PageSize) .Total)}}
     <footer class="pagination">
       {{if gt .Page 1}}
       <a href="{{.Path}}?page={{subtract .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Previous</a>
@@ -82,6 +84,7 @@
       <a href="{{.Path}}?page={{add .Page 1}}{{if .Query}}&q={{.Query}}{{end}}{{if .TagFilter}}&tag={{.TagFilter}}{{end}}">Next</a>
       {{end}}
     </footer>
+    {{end}}
 
     <details class="tools">
       <summary>New customer</summary>

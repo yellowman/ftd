@@ -27,6 +27,138 @@
     }
   });
 
+  // ---- Unsaved-edit guard ---------------------------------------------------
+  // A card's comment/status edits sit in a form the operator must Save; any
+  // navigation or other action while edits are pending would silently discard
+  // them. So: pending edits mark their card dirty. Acting anywhere else —
+  // following a link, submitting another form, changing the status filter —
+  // is blocked, and the dirty card turns red (and scrolls into view) until
+  // the edit is saved or undone. Focus merely leaving a dirty card turns it
+  // red too, so a half-finished edit can't quietly disappear from attention.
+
+  function fieldDefault(el) {
+    if (el.tagName === "SELECT") {
+      for (var i = 0; i < el.options.length; i++) {
+        if (el.options[i].defaultSelected) return el.options[i].value;
+      }
+      return el.options.length ? el.options[0].value : "";
+    }
+    return el.defaultValue;
+  }
+
+  // Recomputes a status form's dirty state from its editable fields and
+  // reflects it on the card. Undoing an edit back to the stored value clears
+  // both the dirty state and any red flag.
+  function refreshDirty(form) {
+    var card = form.closest(".card");
+    if (!card) return;
+    var fields = form.querySelectorAll("textarea[name=comment], select[name=status]");
+    var dirty = false;
+    for (var i = 0; i < fields.length; i++) {
+      var d = fields[i].value !== fieldDefault(fields[i]);
+      fields[i].classList.toggle("dirty-field", d);
+      if (d) dirty = true;
+    }
+    if (dirty) {
+      card.classList.add("dirty");
+    } else {
+      card.classList.remove("dirty", "unsaved");
+    }
+  }
+
+  function dirtyCards() {
+    return document.querySelectorAll(".card.dirty");
+  }
+
+  // Turns every dirty card red and brings the first one into view. Returns
+  // whether anything was flagged (i.e. the triggering action was blocked).
+  function flagUnsaved() {
+    var cards = dirtyCards();
+    for (var i = 0; i < cards.length; i++) cards[i].classList.add("unsaved");
+    if (cards.length) cards[0].scrollIntoView({ behavior: "smooth", block: "center" });
+    return cards.length > 0;
+  }
+
+  document.addEventListener("input", function (e) {
+    var form = e.target.closest && e.target.closest("form.status-form");
+    if (form) refreshDirty(form);
+  });
+  document.addEventListener("change", function (e) {
+    var form = e.target.closest && e.target.closest("form.status-form");
+    if (form) refreshDirty(form);
+  });
+
+  // Focus leaving a dirty card (to another card, the filter, anywhere) flags
+  // it red immediately.
+  document.addEventListener("focusout", function (e) {
+    var card = e.target.closest && e.target.closest(".card.dirty");
+    if (card && (!e.relatedTarget || !card.contains(e.relatedTarget))) {
+      card.classList.add("unsaved");
+    }
+  });
+
+  // Any link is navigation; with pending edits it is blocked outright.
+  document.addEventListener("click", function (e) {
+    if (e.defaultPrevented) return;
+    var link = e.target.closest && e.target.closest("a[href]");
+    if (link && dirtyCards().length) {
+      e.preventDefault();
+      flagUnsaved();
+    }
+  }, true);
+
+  // Submits: saving (or deliberately deleting) the dirty card itself is the
+  // way out and always allowed — but only when it is the ONLY dirty card,
+  // because the resulting page load would discard every other pending edit.
+  // Capture phase so the block runs before the delete-confirm prompt below.
+  var saving = false;
+  document.addEventListener("submit", function (e) {
+    var ownCard = e.target.closest ? e.target.closest(".card") : null;
+    var cards = dirtyCards();
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i] !== ownCard) {
+        e.preventDefault();
+        e.stopPropagation();
+        flagUnsaved();
+        return;
+      }
+    }
+    // Allowed submit: suppress the leave-page prompt for its navigation.
+    saving = true;
+    setTimeout(function () { saving = false; }, 2000);
+  }, true);
+
+  // Backstop for navigation the handlers above can't see (back button, typed
+  // URL, tab close): the browser's own are-you-sure prompt.
+  window.addEventListener("beforeunload", function (e) {
+    if (!saving && dirtyCards().length) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+
+  // ---- Status filter: apply on change ---------------------------------------
+  // Picking a status IS the intent; the Apply button only exists for JS-off
+  // browsers. Blocked (and reverted) while a card holds unsaved edits.
+  var filter = document.querySelector("form.filter");
+  if (filter) {
+    var filterSelect = filter.querySelector("select[name=status]");
+    var filterButton = filter.querySelector("button");
+    if (filterSelect) {
+      if (filterButton) filterButton.hidden = true;
+      filterSelect.setAttribute("data-prev", filterSelect.value);
+      filterSelect.addEventListener("change", function () {
+        if (dirtyCards().length) {
+          filterSelect.value = filterSelect.getAttribute("data-prev");
+          flagUnsaved();
+          return;
+        }
+        // submit() skips the submit-event guard; dirty state was checked.
+        filter.submit();
+      });
+    }
+  }
+
   var section = document.querySelector(".submissions[data-poll-url]");
   if (!section || !window.fetch) return;
 
