@@ -158,11 +158,19 @@ CREATE TABLE IF NOT EXISTS sent_emails (
     body_html TEXT NOT NULL,
     body_text TEXT NOT NULL,
     sent_by TEXT,
-    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- RFC 5322 Message-ID (without angle brackets) stamped on the outgoing
+    -- mail. A customer's answer carries it back in In-Reply-To/References,
+    -- which is how reply ingestion routes the answer to the same to-do.
+    message_id TEXT
 );
+
+-- Backfill for databases created before the column existed.
+ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS message_id TEXT;
 
 CREATE INDEX IF NOT EXISTS sent_emails_customer_idx ON sent_emails (customer_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS sent_emails_submission_idx ON sent_emails (submission_id);
+CREATE INDEX IF NOT EXISTS sent_emails_message_id_idx ON sent_emails (message_id) WHERE message_id IS NOT NULL;
 
 -- Reply ingestion idempotency: the MTA retries deliveries after a lost
 -- acknowledgment, so replies are deduplicated on their Message-ID (or a

@@ -70,13 +70,20 @@
       <button type="submit" class="danger" title="Permanently delete this entry (unlike archiving)">Delete</button>
     </form>
   </div>
-  {{if .S.SentReplies}}
-  {{/* Replies sent from the CRM, threaded under the message they answer. */}}
+  {{if or .S.SentReplies .S.FollowUps}}
+  {{/* The thread under this message: replies sent from the CRM, and customer
+       follow-ups appended by reply ingestion instead of opening new to-dos. */}}
   <div class="sent-replies">
     {{range .S.SentReplies}}
     <details class="sent-reply">
       <summary>&#8617; replied {{.SentAt.Format "2006-01-02 15:04"}}{{with .SentBy.String}} by {{.}}{{end}} &middot; {{.Subject}}</summary>
       <pre class="sent-body">{{.BodyText}}</pre>
+    </details>
+    {{end}}
+    {{range .S.FollowUps}}
+    <details class="sent-reply followup">
+      <summary>&#8618; customer replied {{.When}} &middot; {{.Subject}}</summary>
+      <pre class="sent-body">{{.Body}}</pre>
     </details>
     {{end}}
   </div>

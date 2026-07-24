@@ -112,11 +112,45 @@ type Submission struct {
 	CustomerEmail     sql.NullString
 	EmailUnresolvable bool
 	SentReplies       []SentEmail
+	FollowUps         []FollowUpReply
 }
 
 type FieldEntry struct {
 	Key   string
 	Value string
+}
+
+// FollowUpReply is one customer follow-up appended to an existing to-do: a
+// later message in the same email thread, filed under the original submission
+// (form_data's _replies array) instead of opening a duplicate to-do.
+type FollowUpReply struct {
+	From       string `json:"from"`
+	Subject    string `json:"subject"`
+	Body       string `json:"body"`
+	MessageID  string `json:"message_id"`
+	ReceivedAt string `json:"received_at"`
+}
+
+// When renders the stored RFC 3339 timestamp in the dashboard's usual format;
+// anything unparseable renders as stored.
+func (f FollowUpReply) When() string {
+	if t, err := time.Parse(time.RFC3339, f.ReceivedAt); err == nil {
+		return t.Format("2006-01-02 15:04")
+	}
+	return f.ReceivedAt
+}
+
+// parseFollowUps extracts the appended follow-up replies from a submission
+// payload. Anything malformed (including a form-post field that happens to be
+// named _replies) yields none.
+func parseFollowUps(raw json.RawMessage) []FollowUpReply {
+	var data struct {
+		Replies []FollowUpReply `json:"_replies"`
+	}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil
+	}
+	return data.Replies
 }
 
 type Customer struct {
@@ -1975,6 +2009,7 @@ func (s *server) listSubmissionsAfter(ctx context.Context, after int64, status s
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
 		sub.Fields = extractFields(sub.FormData)
+		sub.FollowUps = parseFollowUps(sub.FormData)
 		submissions = append(submissions, sub)
 	}
 	return submissions, rows.Err()
@@ -2020,6 +2055,7 @@ func (s *server) listSubmissions(ctx context.Context, status string, page, pageS
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
 		sub.Fields = extractFields(sub.FormData)
+		sub.FollowUps = parseFollowUps(sub.FormData)
 		submissions = append(submissions, sub)
 	}
 	if err := rows.Err(); err != nil {
@@ -2210,6 +2246,7 @@ func (s *server) getCustomer(ctx context.Context, id int64) (*Customer, []Submis
 		}
 		sub.FormPretty = formatJSON(sub.FormData)
 		sub.Fields = extractFields(sub.FormData)
+		sub.FollowUps = parseFollowUps(sub.FormData)
 		subs = append(subs, sub)
 	}
 	if err := rows.Err(); err != nil {
@@ -2538,6 +2575,11 @@ func extractFields(raw json.RawMessage) []FieldEntry {
 
 	keys := make([]string, 0, len(data))
 	for k := range data {
+		if k == "_replies" {
+			// Appended follow-up replies render as a thread under the card,
+			// not as a raw JSON field.
+			continue
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)

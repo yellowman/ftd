@@ -871,6 +871,9 @@ details.sent-reply > summary {
 details.sent-reply > summary:hover { color: var(--text); }
 details.sent-reply[open] > summary { color: var(--text); }
 
+/* Customer follow-ups appended to the to-do (incoming, vs. sent replies). */
+details.sent-reply.followup > summary { font-style: italic; }
+
 .sent-body {
   margin: 0.3rem 0 0.4rem;
   padding: 0.5rem 0.7rem;
