@@ -236,12 +236,18 @@
         </dl>
         {{end}}
         {{if .Comment.Valid}}<p class="hint">Note: {{.Comment.String}}</p>{{end}}
-        {{if .SentReplies}}
+        {{if or .SentReplies .FollowUps}}
         <div class="sent-replies">
           {{range .SentReplies}}
           <details class="sent-reply">
             <summary>&#8617; replied {{.SentAt.Format "2006-01-02 15:04"}}{{with .SentBy.String}} by {{.}}{{end}} &middot; {{.Subject}}</summary>
             <pre class="sent-body">{{.BodyText}}</pre>
+          </details>
+          {{end}}
+          {{range .FollowUps}}
+          <details class="sent-reply followup">
+            <summary>&#8618; customer replied {{.When}} &middot; {{.Subject}}</summary>
+            <pre class="sent-body">{{.Body}}</pre>
           </details>
           {{end}}
         </div>

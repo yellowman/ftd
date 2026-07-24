@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // Inbound mail handling: customer replies to mailings (or any mail routed to
@@ -30,14 +33,19 @@ import (
 const (
 	maxInboundBytes  = 1 << 20 // whole message cap
 	maxReplyBodySize = 8000    // stored body excerpt
+	maxThreadRefs    = 20      // In-Reply-To/References ids considered per message
+	// Follow-ups appended to one to-do before overflow files a fresh to-do
+	// instead, bounding a single row's growth.
+	maxAppendedReplies = 100
 )
 
 type inboundMail struct {
 	From      string
 	Subject   string
 	Body      string
-	MessageID string // Message-ID header, or a content hash when absent
-	Drop      string // non-empty: reason this message should be discarded
+	MessageID string   // Message-ID header, or a content hash when absent
+	Refs      []string // message IDs this mail answers (In-Reply-To + References)
+	Drop      string   // non-empty: reason this message should be discarded
 }
 
 // decodeCTE wraps a part reader according to its Content-Transfer-Encoding.
@@ -148,6 +156,19 @@ func parseInboundMail(raw []byte) (*inboundMail, error) {
 		im.MessageID = "sha256:" + hex.EncodeToString(sum[:])
 	}
 
+	// The thread this mail belongs to: In-Reply-To names the direct parent,
+	// References the whole ancestor chain. storeReply matches these against
+	// message IDs ftd has sent or received to find the to-do being answered.
+	seen := map[string]bool{}
+	for _, header := range []string{msg.Header.Get("In-Reply-To"), msg.Header.Get("References")} {
+		for _, id := range parseMsgIDList(header) {
+			if !seen[id] && len(im.Refs) < maxThreadRefs {
+				seen[id] = true
+				im.Refs = append(im.Refs, id)
+			}
+		}
+	}
+
 	body := findTextPart(msg.Header.Get("Content-Type"),
 		msg.Header.Get("Content-Transfer-Encoding"), msg.Body, 0)
 	body = strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
@@ -159,12 +180,141 @@ func parseInboundMail(raw []byte) (*inboundMail, error) {
 	return im, nil
 }
 
-// storeReply files an inbound message as a submission linked to the sender's
-// customer record (created if new, like form intake). Filing is idempotent on
-// the message's dedupe key: a redelivery of an already-stored message is
-// acknowledged as success without creating a second to-do, backed by a
-// partial unique index so even concurrent redeliveries cannot double-file.
+// parseMsgIDList splits a References/In-Reply-To header into bare message IDs
+// (angle brackets stripped), skipping anything too long or non-id-shaped.
+func parseMsgIDList(header string) []string {
+	var ids []string
+	for _, field := range strings.Fields(header) {
+		id := strings.Trim(field, "<>")
+		if id != "" && len(id) <= 256 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// repliesArraySQL yields a submission's appended-replies array, or an empty
+// array when the key is absent — or is not an array at all, which a hostile
+// form post could arrange by submitting a field named "_replies" (form fields
+// become JSONB keys verbatim; an unguarded jsonb_array_elements over a scalar
+// would make every inbound delivery error out permanently).
+const repliesArraySQL = `(CASE WHEN jsonb_typeof(form_data->'_replies') = 'array'
+    THEN form_data->'_replies' ELSE '[]'::jsonb END)`
+
+// replyAlreadyFiled reports whether a message ID is already in the inbox in
+// either form: as the root of a to-do created from a reply, or appended to a
+// to-do as a follow-up. Roots are also guarded by the partial unique index,
+// but appended follow-ups leave no indexed row, so MTA redeliveries need this
+// explicit check.
+func (s *server) replyAlreadyFiled(ctx context.Context, msgID string) (bool, error) {
+	var dup bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+		     SELECT 1 FROM submissions
+		     WHERE (user_agent = 'email-reply' AND form_data->>'_reply_message_id' = $1)
+		        OR EXISTS (SELECT 1 FROM jsonb_array_elements(`+repliesArraySQL+`) e
+		                   WHERE e->>'message_id' = $1))`, msgID).Scan(&dup)
+	return dup, err
+}
+
+type replyTarget struct {
+	id         int64
+	customerID sql.NullInt64
+}
+
+// findReplyTarget resolves which to-do a reply answers, from the message IDs
+// in its In-Reply-To/References. Candidates come from two directions:
+// operator-sent messages (sent_emails records the Message-ID stamped on each
+// outgoing reply, and which submission it answered) and thread siblings — a
+// to-do created from an earlier inbound message, or one already carrying a
+// referenced message as a follow-up. A long thread can reference several
+// to-dos (an archived original plus the fresh to-do its later follow-up
+// opened), so all candidates are ranked together: non-archived first — the
+// conversation keeps flowing into the live item — then sent-mail matches over
+// siblings, newest first.
+func (s *server) findReplyTarget(ctx context.Context, refs []string) (*replyTarget, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	var t replyTarget
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, customer_id FROM (
+		     SELECT sub.id, sub.customer_id, sub.status, 1 AS src, se.id AS recency
+		     FROM sent_emails se JOIN submissions sub ON sub.id = se.submission_id
+		     WHERE se.message_id = ANY($1)
+		   UNION ALL
+		     SELECT id, customer_id, status, 2 AS src, id AS recency
+		     FROM submissions
+		     WHERE form_data->>'_reply_message_id' = ANY($1)
+		        OR EXISTS (SELECT 1 FROM jsonb_array_elements(`+repliesArraySQL+`) e
+		                   WHERE e->>'message_id' = ANY($1))
+		 ) candidates
+		 ORDER BY (status = 'archived'), src, recency DESC LIMIT 1`,
+		pq.Array(refs)).Scan(&t.id, &t.customerID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reply target lookup: %w", err)
+	}
+	return &t, nil
+}
+
+// appendReply files a follow-up onto an existing to-do and pulls a completed
+// item back to 'new' so it resurfaces in the active inbox. The guards make it
+// decline — returning false, with the caller deciding what happens instead —
+// when the to-do was archived meanwhile, the follow-up cap is reached, or a
+// concurrent redelivery already appended this same message.
+func (s *server) appendReply(ctx context.Context, subID int64, im *inboundMail) (bool, error) {
+	entry, err := json.Marshal([]map[string]interface{}{{
+		"from":        im.From,
+		"subject":     im.Subject,
+		"body":        im.Body,
+		"message_id":  im.MessageID,
+		"received_at": time.Now().UTC().Format(time.RFC3339),
+	}})
+	if err != nil {
+		return false, fmt.Errorf("marshal follow-up: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE submissions
+		 SET form_data = jsonb_set(form_data, '{_replies}', `+repliesArraySQL+` || $2::jsonb),
+		     status = CASE WHEN status = 'complete' THEN 'new' ELSE status END
+		 WHERE id = $1 AND status <> 'archived'
+		   AND jsonb_array_length(`+repliesArraySQL+`) < $3
+		   AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(`+repliesArraySQL+`) e
+		                   WHERE e->>'message_id' = $4)`,
+		subID, string(entry), maxAppendedReplies, im.MessageID)
+	if err != nil {
+		return false, fmt.Errorf("append reply: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// storeReply files an inbound message as a to-do. When its thread headers
+// identify an existing to-do of the same customer, the message is appended
+// there as a follow-up instead of opening a duplicate — reopening the to-do
+// ('complete' goes back to 'new') since the customer is clearly not done with
+// it. An archived to-do stays archived: the follow-up becomes a fresh to-do.
+// Otherwise the message becomes a new submission linked to the sender's
+// customer record (created if new, like form intake).
+//
+// Filing is idempotent on the message's dedupe key: a redelivery of an
+// already-stored message is acknowledged as success without filing twice,
+// backed by the up-front check (both filing forms), the appendReply
+// message-id guard, and — for new-row inserts — a partial unique index that
+// holds even under concurrent redeliveries.
 func (s *server) storeReply(ctx context.Context, im *inboundMail) error {
+	dup, err := s.replyAlreadyFiled(ctx, im.MessageID)
+	if err != nil {
+		return fmt.Errorf("reply dedupe check: %w", err)
+	}
+	if dup {
+		log.Printf("duplicate delivery of %s from %s ignored", im.MessageID, im.From)
+		return nil
+	}
+
 	payload := map[string]interface{}{
 		"email":             im.From,
 		"_reply_from":       im.From,
@@ -174,6 +324,34 @@ func (s *server) storeReply(ctx context.Context, im *inboundMail) error {
 	}
 
 	customerID := s.linkCustomer(ctx, payload)
+
+	target, err := s.findReplyTarget(ctx, im.Refs)
+	if err != nil {
+		return err
+	}
+	// Append only when the sender resolves to the same customer the to-do
+	// belongs to: thread headers are sender-controlled, so a matching
+	// References line alone must not let one customer's mail land inside
+	// another's to-do. A mismatch simply files a fresh to-do.
+	if target != nil && customerID.Valid && target.customerID.Valid && customerID.Int64 == target.customerID.Int64 {
+		appended, err := s.appendReply(ctx, target.id, im)
+		if err != nil {
+			return err
+		}
+		if appended {
+			log.Printf("reply from %s (%q) appended to submission #%d", im.From, im.Subject, target.id)
+			return nil
+		}
+		// Declined: archived meanwhile, cap reached, or a concurrent delivery
+		// of this same message won the append. Re-check before filing fresh
+		// so the last case doesn't double-file.
+		if dup, err := s.replyAlreadyFiled(ctx, im.MessageID); err != nil {
+			return fmt.Errorf("reply dedupe recheck: %w", err)
+		} else if dup {
+			log.Printf("duplicate delivery of %s from %s ignored", im.MessageID, im.From)
+			return nil
+		}
+	}
 
 	formJSON, err := json.Marshal(payload)
 	if err != nil {

@@ -393,6 +393,23 @@ Run `newaliases`. The helper reads one message on stdin, loads
 and exits with sysexits codes so transient database problems are requeued
 rather than bounced.
 
+**Follow-ups stay on one to-do** — replies are threaded by standard mail
+headers. Every reply sent from a customer page is stamped with a `Message-ID`
+(recorded with the sent-mail record) and `In-Reply-To`/`References` pointing
+at the customer's original mail; when their answer comes back, its
+`In-Reply-To`/`References` identify the to-do it belongs to. Instead of
+opening a duplicate, the follow-up is appended under that card (expandable,
+like sent replies), and a to-do already marked complete is reopened to `new`
+so it resurfaces in the active inbox — the customer clearly isn't done with
+it. Two guards: the sender must resolve to the same customer the to-do
+belongs to (thread headers are sender-controlled, so a forged `References`
+line can't inject mail into someone else's to-do), and an **archived** to-do
+is never reopened — its follow-up files as a fresh to-do, and the rest of
+that conversation then flows into the fresh one. Replies that can't be
+matched (e.g. the first answer to a mailing) become new to-dos exactly as
+before. A reopened card shows up on the next dashboard load (the live ticker
+only announces brand-new items).
+
 **Deliverability** — publish SPF, sign with DKIM at the relay (setups below),
 and set rDNS/PTR for the relay IP, or expect spam-foldering.
 

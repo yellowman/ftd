@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1439,16 +1441,50 @@ func (s *server) buildMessage(m *Mailing, email, token string, links map[string]
 	return buf.Bytes()
 }
 
+// msgIDSafeRe accepts a stored message ID for reuse inside a mail header:
+// printable ASCII with no whitespace, so nothing header-injectable survives.
+var msgIDSafeRe = regexp.MustCompile(`^[!-~]{1,256}$`)
+
+// newMessageID mints a globally unique RFC 5322 Message-ID (returned without
+// the angle brackets) under the sending address's domain. Outgoing replies
+// are stamped and recorded with it so a customer's answer — whose
+// In-Reply-To/References carry it back — can be matched to the to-do it
+// belongs to. Returns "" if no randomness is available; callers skip the
+// header rather than emit a guessable ID.
+func (s *server) newMessageID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		log.Printf("message-id randomness unavailable: %v", err)
+		return ""
+	}
+	domain := "ftd.invalid"
+	if addr, err := mail.ParseAddress(s.mailFrom); err == nil {
+		if i := strings.LastIndex(addr.Address, "@"); i >= 0 && i < len(addr.Address)-1 {
+			domain = addr.Address[i+1:]
+		}
+	}
+	return "ftd-" + hex.EncodeToString(b[:]) + "@" + domain
+}
+
 // buildDirectMessage assembles a personal 1:1 email (a reply composed from a
 // customer page). Unlike mailings it carries no tracking, no unsubscribe
 // footer, and no bulletproof table wrapper — it should read like a person
 // wrote it. Text alternative is generated from the HTML for text-only clients.
-func (s *server) buildDirectMessage(to, subject, htmlBody string) []byte {
+// msgID (bare, no angle brackets) becomes the Message-ID; inReplyTo, when
+// non-empty, threads the message under the customer's original mail.
+func (s *server) buildDirectMessage(to, subject, htmlBody, msgID, inReplyTo string) []byte {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "From: %s\r\n", s.mailFrom)
 	fmt.Fprintf(&buf, "To: %s\r\n", to)
 	if s.replyTo != "" && !sameAddress(s.replyTo, s.mailFrom) {
 		fmt.Fprintf(&buf, "Reply-To: %s\r\n", s.replyTo)
+	}
+	if msgID != "" {
+		fmt.Fprintf(&buf, "Message-ID: <%s>\r\n", msgID)
+	}
+	if inReplyTo != "" {
+		fmt.Fprintf(&buf, "In-Reply-To: <%s>\r\n", inReplyTo)
+		fmt.Fprintf(&buf, "References: <%s>\r\n", inReplyTo)
 	}
 	clean := strings.NewReplacer("\r", " ", "\n", " ").Replace(subject)
 	fmt.Fprintf(&buf, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", clean))
@@ -1593,19 +1629,30 @@ func (s *server) handleCustomerEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A reply targets one received message; verify the submission really
-	// belongs to this customer before threading under it.
+	// belongs to this customer before threading under it. Email-originated
+	// to-dos carry the customer's Message-ID — threading our answer under it
+	// puts our ID in the customer's References, so their next reply finds its
+	// way back to the same to-do. Hash-shaped dedupe keys (sha256:..., minted
+	// when the sender omitted a Message-ID) are not real IDs and are skipped.
 	var replyTo sql.NullInt64
+	var inReplyTo string
 	if v := r.FormValue("submission_id"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			var owner sql.NullInt64
+			var rootID sql.NullString
 			if err := s.db.QueryRowContext(r.Context(),
-				"SELECT customer_id FROM submissions WHERE id=$1", n).Scan(&owner); err == nil && owner.Valid && owner.Int64 == id {
+				`SELECT customer_id, form_data->>'_reply_message_id' FROM submissions WHERE id=$1`,
+				n).Scan(&owner, &rootID); err == nil && owner.Valid && owner.Int64 == id {
 				replyTo = sql.NullInt64{Int64: n, Valid: true}
+				if mid := strings.TrimSpace(rootID.String); msgIDSafeRe.MatchString(mid) && !strings.HasPrefix(mid, "sha256:") {
+					inReplyTo = mid
+				}
 			}
 		}
 	}
 
-	if err := s.sendSMTP(email, s.buildDirectMessage(email, subject, body)); err != nil {
+	msgID := s.newMessageID()
+	if err := s.sendSMTP(email, s.buildDirectMessage(email, subject, body, msgID, inReplyTo)); err != nil {
 		log.Printf("direct email to customer %d failed: %v", id, err)
 		http.Redirect(w, r, view+"&saved=mailfail", http.StatusSeeOther)
 		return
@@ -1617,9 +1664,9 @@ func (s *server) handleCustomerEmail(w http.ResponseWriter, r *http.Request) {
 	// message, so the flash says "sent but not recorded" instead of success.
 	user, _ := r.Context().Value(ctxKeyUser).(string)
 	if _, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO sent_emails (customer_id, submission_id, to_email, subject, body_html, body_text, sent_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		id, replyTo, email, subject, body, htmlToText(body), user); err != nil {
+		`INSERT INTO sent_emails (customer_id, submission_id, to_email, subject, body_html, body_text, sent_by, message_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		id, replyTo, email, subject, body, htmlToText(body), user, nullIfEmpty(msgID)); err != nil {
 		log.Printf("sent email record insert error: %v", err)
 		http.Redirect(w, r, view+"&saved=mailrecfail", http.StatusSeeOther)
 		return
