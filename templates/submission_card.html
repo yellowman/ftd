@@ -27,7 +27,11 @@
       <div><strong>referer</strong><span>{{.S.Referer.String}}</span></div>
       {{end}}
       {{if .S.FilePath.Valid}}
+      {{if .S.HasStoredUpload}}
+      <div><strong>file</strong><span class="file-ref"><a href="{{.AdminPrefix}}/download?id={{.S.ID}}" title="Download ({{.S.FilePath.String}})">{{.S.UploadName}} &#8595;</a></span></div>
+      {{else}}
       <div><strong>file</strong><span class="file-ref">{{.S.FilePath.String}}</span></div>
+      {{end}}
       {{end}}
     </div>
   </div>

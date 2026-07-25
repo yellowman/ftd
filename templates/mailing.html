@@ -8,12 +8,10 @@
 <body>
   <div class="container">
     <header class="header">
-      <div>
-        <p class="eyebrow">ftd · CRM</p>
+      <div class="masthead">
+        <span class="brand">ftd</span>
+        <span class="area">CRM</span>
         <h1>{{.Mailing.Subject}}</h1>
-        <p class="lede">Mailing #{{.Mailing.ID}} · <span class="status-pill {{.Mailing.Status}}">{{.Mailing.Status}}</span>{{if .Mailing.SentAt.Valid}} · sent {{.Mailing.SentAt.Time.Format "2006-01-02 15:04"}}{{end}}{{if .Mailing.CreatedBy.Valid}} · by {{.Mailing.CreatedBy.String}}{{end}}
-          {{if .Mailing.ListID.Valid}}· <a class="assoc" href="{{.AdminPrefix}}/lists/view?id={{.Mailing.ListID.Int64}}">{{.Mailing.ListName.String}}</a>{{end}}
-          {{range .TagList}}<a class="assoc" href="{{$.AdminPrefix}}/customers?tag={{.}}">{{.}}</a> {{end}}</p>
       </div>
       <div class="actions">
         <nav class="tabs">

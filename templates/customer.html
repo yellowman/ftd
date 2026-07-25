@@ -8,13 +8,10 @@
 <body>
   <div class="container">
     <header class="header">
-      <div>
-        <p class="eyebrow">ftd · CRM</p>
+      <div class="masthead">
+        <span class="brand">ftd</span>
+        <span class="area">CRM</span>
         <h1>{{if .Customer.Name.Valid}}{{.Customer.Name.String}}{{else if .Customer.Email.Valid}}{{.Customer.Email.String}}{{else}}Customer{{end}}</h1>
-        <p class="lede">Customer #{{.Customer.ID}} · created {{.Customer.CreatedAt.Format "2006-01-02"}} · updated {{.Customer.UpdatedAt.Format "2006-01-02"}}
-          {{if .Customer.UnsubscribedAt.Valid}} <span class="status-pill archived">unsubscribed {{.Customer.UnsubscribedAt.Time.Format "2006-01-02"}}</span>{{end}}
-          {{if .Customer.BouncedAt.Valid}} <span class="status-pill failed">bounced {{.Customer.BouncedAt.Time.Format "2006-01-02"}}</span>{{end}}
-        </p>
       </div>
       <div class="actions">
         <nav class="tabs">
@@ -224,7 +221,11 @@
             <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
             <div><strong>Source IP</strong><span>{{.IP.String}}</span></div>
             {{if .FilePath.Valid}}
+            {{if .HasStoredUpload}}
+            <div><strong>Uploaded File</strong><span class="file-ref"><a href="{{$.AdminPrefix}}/download?id={{.ID}}" title="Download ({{.FilePath.String}})">{{.UploadName}} &#8595;</a></span></div>
+            {{else}}
             <div><strong>Uploaded File</strong><span class="file-ref">{{.FilePath.String}}</span></div>
+            {{end}}
             {{end}}
           </div>
         </div>

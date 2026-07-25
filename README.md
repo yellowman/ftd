@@ -199,7 +199,11 @@ daemon flags through rc.d as usual — e.g. an alternate config:
 submitted. A hidden `redirect` field sends the submitter to a thank-you page
 afterward; the target must be a root-relative path or a same-host URL
 (cross-host redirects are rejected). With `max_upload_mb` set, one file field
-per form is accepted and stored under `uploads/` in the chroot.
+per form is accepted and stored under `uploads/` in the chroot; the
+submission's card shows the upload as a download link that serves the file
+under the filename the submitter originally attached (stored on disk under a
+collision-proof generated name — the client's filename is never used as a
+path). A failed upload shows a `Failed Upload (<status>)` label instead.
 
 ### Email deliverability check
 

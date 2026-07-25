@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -25,11 +26,13 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
@@ -118,6 +121,50 @@ type Submission struct {
 type FieldEntry struct {
 	Key   string
 	Value string
+}
+
+// storedUploadRe matches exactly the paths saveUploadedFile generates. The
+// file_path column also carries non-path labels ("Failed Upload (413)"), and
+// nothing else on disk should ever be reachable through the download handler,
+// so both the handler and the template link key off this shape.
+var storedUploadRe = regexp.MustCompile(`^uploads/ftd\.[0-9]{8}T[0-9]{6}Z,[0-9a-f]{8}$`)
+
+// HasStoredUpload reports whether this submission's file_path names a real
+// stored upload (as opposed to a failure label), i.e. whether a download link
+// makes sense.
+func (s Submission) HasStoredUpload() bool {
+	return s.FilePath.Valid && storedUploadRe.MatchString(s.FilePath.String)
+}
+
+// UploadName is the filename shown (and served) for the stored upload: the
+// submitter's original filename when one was recorded, else the stored name.
+func (s Submission) UploadName() string {
+	var meta struct {
+		Original string `json:"_upload_original_filename"`
+	}
+	_ = json.Unmarshal(s.FormData, &meta)
+	return downloadName(meta.Original, s.FilePath.String)
+}
+
+// downloadName reduces a client-supplied original filename to something safe
+// to hand back as a download name: base name only (either slash style), no
+// control characters, bounded length. Falls back to the stored file's name.
+func downloadName(original, stored string) string {
+	name := filepath.Base(strings.ReplaceAll(strings.TrimSpace(original), "\\", "/"))
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	if name == "" || name == "." || name == ".." || name == "/" {
+		return filepath.Base(stored)
+	}
+	for len(name) > 200 {
+		_, size := utf8.DecodeLastRuneInString(name)
+		name = name[:len(name)-size]
+	}
+	return name
 }
 
 // FollowUpReply is one customer follow-up appended to an existing to-do: a
@@ -670,6 +717,7 @@ func (s *server) serveFastCGI(l net.Listener) error {
 	mux.Handle(s.adminPath("/poll"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handlePoll))))
 	mux.Handle(s.adminPath("/delete-invalid"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteInvalid))))
 	mux.Handle(s.adminPath("/delete"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDeleteSubmission))))
+	mux.Handle(s.adminPath("/download"), s.withAdminHeaders(s.requireAuth(http.HandlerFunc(s.handleDownload))))
 	mux.Handle(s.adminPath("/"), dashboard)
 
 	// Public (unauthenticated) mailing endpoints: open-tracking pixel,
@@ -1639,6 +1687,66 @@ func pruneOrphanCustomers(ctx context.Context, tx *sql.Tx, ids []int64) error {
 // handleDeleteSubmission hard-deletes one submission (test entries, junk) —
 // unlike archiving, the row is gone. The linked customer is pruned too when
 // the deleted submission was the only reason it existed.
+// handleDownload streams a submission's stored upload back to the operator,
+// named as the file the submitter originally attached. The stored path is
+// accepted only when it matches the generator's exact shape, so a corrupted
+// or hand-edited file_path can never point this handler anywhere else, and
+// content is always served as an opaque attachment — never rendered in the
+// admin origin.
+func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	var sub Submission
+	err = s.db.QueryRowContext(r.Context(),
+		`SELECT file_path, form_data FROM submissions WHERE id=$1`, id,
+	).Scan(&sub.FilePath, &sub.FormData)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		log.Printf("download lookup error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	if !sub.HasStoredUpload() {
+		http.Error(w, "no stored upload", http.StatusNotFound)
+		return
+	}
+
+	f, err := os.Open(sub.FilePath.String)
+	if err != nil {
+		// Row says stored, disk disagrees (pruned, moved, restored backup).
+		log.Printf("download open %s: %v", sub.FilePath.String, err)
+		http.Error(w, "file unavailable", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		http.Error(w, "file unavailable", http.StatusNotFound)
+		return
+	}
+
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": sub.UploadName()})
+	if disposition == "" {
+		disposition = `attachment; filename="download"`
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", disposition)
+	// Uploads are immutable once stored; ServeContent adds Content-Length and
+	// range support for free. The empty name keeps its content-type sniffing
+	// out of play — the explicit octet-stream header above wins.
+	http.ServeContent(w, r, "", fi.ModTime(), f)
+}
+
 func (s *server) handleDeleteSubmission(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
