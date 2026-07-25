@@ -224,7 +224,11 @@
             <div><strong>Submitted</strong><span>{{.SubmittedAt}}</span></div>
             <div><strong>Source IP</strong><span>{{.IP.String}}</span></div>
             {{if .FilePath.Valid}}
+            {{if .HasStoredUpload}}
+            <div><strong>Uploaded File</strong><span class="file-ref"><a href="{{$.AdminPrefix}}/download?id={{.ID}}" title="Download ({{.FilePath.String}})">{{.UploadName}} &#8595;</a></span></div>
+            {{else}}
             <div><strong>Uploaded File</strong><span class="file-ref">{{.FilePath.String}}</span></div>
+            {{end}}
             {{end}}
           </div>
         </div>

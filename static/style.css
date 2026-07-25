@@ -440,6 +440,9 @@ button.send:hover { background: rgba(121, 183, 145, 0.08); }
   color: var(--accent);
 }
 
+.file-ref a { color: var(--accent); text-decoration: none; }
+.file-ref a:hover { color: var(--accent-bright); text-decoration: underline; }
+
 /* Decoded form fields are the payload — the most prominent block. */
 .fields {
   display: grid;
