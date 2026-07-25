@@ -221,7 +221,14 @@ does not exist" / null MX. Resolver timeouts or failures never penalize a
 visitor, and non-ASCII (IDN) domains are skipped rather than guessed at.
 Nameservers are read from `/etc/resolv.conf` once at startup (the daemon
 chroots afterward); with none configured the DNS half of the check is
-disabled — syntax checking still applies.
+disabled — syntax checking still applies. When started as root, ftd also
+copies `/etc/resolv.conf` into the chroot before entering it (the same idiom
+httpd(8) documents for chrooted CGI): Go re-reads that file per query to
+decide lookup order, and on OpenBSD a missing resolv.conf means "files
+only" — which would silently break the A/AAAA fallback for MX-less domains
+and mis-flag deliverable addresses. Every flagged submission is logged with
+its reason, so a surprising "bad email" pill can be traced in the daemon
+log.
 
 **How the warning reaches your site** — the response shape depends on how the
 form was submitted, and the contract is stable:

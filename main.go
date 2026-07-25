@@ -484,6 +484,46 @@ func openDB(dbURL string) (*sql.DB, error) {
 	return db, nil
 }
 
+// provisionChrootDNS copies /etc/resolv.conf into the chroot-to-be, the same
+// idiom OpenBSD documents for CGI under httpd's chroot. Go's resolver
+// re-reads resolv.conf on every query to decide the lookup ORDER, and on
+// OpenBSD a missing file legally means "lookup: files only" — no DNS at all.
+// That silently broke the email deliverability check's implicit-MX fallback
+// inside the chroot: MX record lookups kept working (they dial the captured
+// nameservers directly), but the A/AAAA host lookup consulted only a
+// nonexistent hosts file, so every MX-less domain came back "no such host"
+// and was wrongly flagged undeliverable.
+//
+// Runs as root, so it refuses symlinks at both levels rather than follow one
+// out of the chroot. Best-effort beyond that: on failure the daemon still
+// runs and only the DNS check degrades.
+func provisionChrootDNS(root string) {
+	data, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		log.Printf("chroot resolv.conf: %v (DNS email check may degrade inside chroot)", err)
+		return
+	}
+	etc := filepath.Join(root, "etc")
+	if err := os.Mkdir(etc, 0755); err != nil && !os.IsExist(err) {
+		log.Printf("chroot resolv.conf: %v", err)
+		return
+	}
+	if fi, err := os.Lstat(etc); err != nil || !fi.IsDir() {
+		log.Printf("chroot resolv.conf: %s is not a real directory; not writing", etc)
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(etc, "resolv.conf"),
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0644)
+	if err != nil {
+		log.Printf("chroot resolv.conf: %v", err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		log.Printf("chroot resolv.conf: write: %v", err)
+	}
+}
+
 func dropPrivilegesIfRoot() error {
 	if os.Geteuid() != 0 {
 		return nil
@@ -503,6 +543,8 @@ func dropPrivilegesIfRoot() error {
 	if err != nil {
 		return fmt.Errorf("parse _ftd gid: %w", err)
 	}
+
+	provisionChrootDNS(u.HomeDir)
 
 	if err := syscall.Chroot(u.HomeDir); err != nil {
 		return fmt.Errorf("chroot to %s: %w", u.HomeDir, err)
@@ -838,9 +880,13 @@ func (s *server) handleSubmission(w http.ResponseWriter, r *http.Request) {
 	if emailFieldPresent(payload) {
 		email, _, _, _, _ := extractContact(payload)
 		if email == "" {
-			emailUnresolvable = true // supplied, but nothing parseable in any email field
+			// Supplied, but nothing parseable in any email field. The raw
+			// value is hostile input; the dashboard card shows it verbatim.
+			emailUnresolvable = true
+			log.Print("email check: flagged — an email field was filled in but does not parse as a bare address")
 		} else if s.emailCheck.verdict(r.Context(), email) == emailInvalid {
 			emailUnresolvable = true
+			log.Printf("email check: flagged %q — domain fails syntax or MX and A/AAAA lookups", email)
 		}
 	}
 

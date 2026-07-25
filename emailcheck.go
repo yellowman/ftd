@@ -17,6 +17,13 @@ package main
 // re-reads /etc/resolv.conf, gone inside the chroot). The nameservers are
 // therefore captured once at startup, while the file is still visible, and
 // every query dials those addresses directly.
+//
+// Capturing the servers is not enough by itself: Go also re-reads
+// resolv.conf per query to pick the lookup ORDER, and on OpenBSD a missing
+// file means "files only" — host (A/AAAA) lookups then never touch DNS even
+// though record lookups like MX still do. Startup therefore also copies
+// resolv.conf into the chroot (provisionChrootDNS in main.go) so order
+// resolution behaves the same inside and out.
 
 import (
 	"context"
