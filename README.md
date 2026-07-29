@@ -327,6 +327,15 @@ see its customers, and use the list segment tool to turn a tag into a mailing
 audience. Each customer page also lists exactly which mailing links they
 clicked, when, and how often.
 
+Because the form endpoint is unauthenticated, hostile posts can invent tag
+names — so vocabulary entries record their origin, and tags first learned
+from a form post are automatically removed the moment nothing references
+them anymore. Delete the junk submissions (individually or via "Delete bad
+email") and the junk tags they minted disappear with them. Tags you created
+yourself — on the Tags page, in a mailing, on a customer, or via CSV
+import — are never auto-removed, so pre-staged vocabulary stays put; the
+Tags page shows each tag's origin.
+
 **Users** — the schema seeds `admin` / `change-me`. Add your team on the Users
 page; the dashboard password form changes the logged-in user's password.
 

@@ -798,7 +798,7 @@ func (s *server) handleMailingUpdate(w http.ResponseWriter, r *http.Request) {
 	for _, name := range splitTagList(r.FormValue("tags")) {
 		var tagID int64
 		if err := s.db.QueryRowContext(r.Context(),
-			`INSERT INTO tags (name) VALUES ($1)
+			`INSERT INTO tags (name, created_via) VALUES ($1, 'manual')
 			 ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
 			 RETURNING id`, name).Scan(&tagID); err != nil {
 			log.Printf("mailing tag upsert error: %v", err)
@@ -2275,6 +2275,7 @@ type TagChip struct {
 type TagInfo struct {
 	ID            int64
 	Name          string
+	CreatedVia    string
 	CustomerCount int
 	CreatedAt     time.Time
 }
@@ -2343,9 +2344,12 @@ func extractFormTags(payload map[string]interface{}) []string {
 	return tags
 }
 
-// applyTags associates tags (created if missing) with a customer, recording how
-// the association was made. Existing associations are left untouched, so a
-// manual tag is not downgraded to source=form by a later submission.
+// applyTags associates tags (created if missing) with a customer, recording
+// how the association was made. A tag created here also records the same
+// source as its own origin (created_via); on conflict the original origin is
+// kept, so a manual tag is never downgraded to form-born by a later
+// submission reusing the name. Existing associations are left untouched for
+// the same reason.
 func (s *server) applyTags(ctx context.Context, customerID int64, names []string, source string) {
 	if len(names) > maxTagsPerApply {
 		names = names[:maxTagsPerApply]
@@ -2353,9 +2357,9 @@ func (s *server) applyTags(ctx context.Context, customerID int64, names []string
 	for _, name := range names {
 		var tagID int64
 		err := s.db.QueryRowContext(ctx,
-			`INSERT INTO tags (name) VALUES ($1)
+			`INSERT INTO tags (name, created_via) VALUES ($1, $2)
 			 ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-			 RETURNING id`, name).Scan(&tagID)
+			 RETURNING id`, name, source).Scan(&tagID)
 		if err != nil {
 			log.Printf("tag upsert error for %q: %v", name, err)
 			continue
@@ -2366,6 +2370,33 @@ func (s *server) applyTags(ctx context.Context, customerID int64, names []string
 			log.Printf("customer tag error for %q: %v", name, err)
 		}
 	}
+}
+
+// dbExecer lets cleanup helpers run inside a transaction or standalone.
+type dbExecer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+// pruneOrphanFormTags deletes vocabulary entries that were minted by
+// unauthenticated form submissions and are no longer referenced by any
+// customer or mailing. Hostile posts can invent tags freely (the tags field
+// is open by design so operators' hidden fields can self-classify), so what
+// keeps the vocabulary clean is this reclamation: delete the junk
+// submissions and the junk tags they minted go too. Operator-created
+// vocabulary (Tags page, mailing compose, chip add, CSV import) is never
+// auto-removed — pre-staged names stay available even while unused.
+func pruneOrphanFormTags(ctx context.Context, db dbExecer) error {
+	res, err := db.ExecContext(ctx,
+		`DELETE FROM tags t WHERE t.created_via = 'form'
+		   AND NOT EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.tag_id = t.id)
+		   AND NOT EXISTS (SELECT 1 FROM mailing_tags mt WHERE mt.tag_id = t.id)`)
+	if err != nil {
+		return fmt.Errorf("prune form tags: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("pruned %d unreferenced form-learned tag(s)", n)
+	}
+	return nil
 }
 
 func (s *server) listTagNames(ctx context.Context) ([]string, error) {
@@ -2441,6 +2472,11 @@ func (s *server) handleCustomerTag(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
+		// Removing the last use of a form-learned tag un-learns it; the
+		// removal above already succeeded, so a prune failure only logs.
+		if err := pruneOrphanFormTags(r.Context(), s.db); err != nil {
+			log.Printf("tag remove: %v", err)
+		}
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
@@ -2494,7 +2530,7 @@ func (s *server) handleTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.QueryContext(r.Context(),
-		`SELECT t.id, t.name, t.created_at,
+		`SELECT t.id, t.name, t.created_via, t.created_at,
 		    (SELECT COUNT(*) FROM customer_tags ct WHERE ct.tag_id = t.id)
 		 FROM tags t ORDER BY t.name`)
 	if err != nil {
@@ -2506,7 +2542,7 @@ func (s *server) handleTags(w http.ResponseWriter, r *http.Request) {
 	tags := []TagInfo{}
 	for rows.Next() {
 		var t TagInfo
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt, &t.CustomerCount); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedVia, &t.CreatedAt, &t.CustomerCount); err != nil {
 			log.Printf("tags scan error: %v", err)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return

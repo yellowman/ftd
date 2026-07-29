@@ -195,8 +195,18 @@ END $$;
 CREATE TABLE IF NOT EXISTS tags (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
+    -- Who first minted this vocabulary entry. Form submissions are
+    -- unauthenticated input: tags they create are auto-removed once nothing
+    -- references them (see pruneOrphanFormTags), so junk posted at the form
+    -- endpoint cannot permanently pollute the vocabulary. Operator-created
+    -- vocabulary is never auto-removed.
+    created_via TEXT NOT NULL DEFAULT 'manual' CHECK (created_via IN ('manual','form','click','import')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Backfill for databases created before the column existed; existing tags
+-- count as operator-approved so the upgrade never auto-deletes anything.
+ALTER TABLE tags ADD COLUMN IF NOT EXISTS created_via TEXT NOT NULL DEFAULT 'manual';
 
 CREATE TABLE IF NOT EXISTS customer_tags (
     customer_id INTEGER NOT NULL REFERENCES customers (id) ON DELETE CASCADE,

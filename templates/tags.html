@@ -36,12 +36,13 @@
       <p>No tags yet. Tag a customer, a mailing, or add a hidden <code>tags</code> field to a form.</p>
       {{else}}
       <table class="table">
-        <thead><tr><th>Tag</th><th>Customers</th><th>Created</th><th></th></tr></thead>
+        <thead><tr><th>Tag</th><th>Customers</th><th>Origin</th><th>Created</th><th></th></tr></thead>
         <tbody>
           {{range .Tags}}
           <tr>
             <td><a href="{{$.AdminPrefix}}/customers?tag={{.Name}}">{{.Name}}</a></td>
             <td>{{.CustomerCount}}</td>
+            <td{{if eq .CreatedVia "form"}} title="Learned from an unauthenticated form post; auto-removed when its last use disappears"{{end}}>{{.CreatedVia}}</td>
             <td>{{.CreatedAt.Format "2006-01-02"}}</td>
             <td>
               <form method="post" action="{{$.AdminPrefix}}/tags" class="inline-form">

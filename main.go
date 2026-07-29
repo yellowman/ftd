@@ -1701,6 +1701,14 @@ func (s *server) handleDeleteInvalid(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Junk submissions mint junk tags; deleting the submissions (and their
+	// pruned customers) is what un-learns them.
+	if err := pruneOrphanFormTags(r.Context(), tx); err != nil {
+		log.Printf("delete invalid tag prune error: %v", err)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
 	if err := tx.Commit(); err != nil {
 		log.Printf("delete invalid commit error: %v", err)
 		http.Error(w, "server error", http.StatusInternalServerError)
@@ -1730,9 +1738,6 @@ func pruneOrphanCustomers(ctx context.Context, tx *sql.Tx, ids []int64) error {
 	return err
 }
 
-// handleDeleteSubmission hard-deletes one submission (test entries, junk) —
-// unlike archiving, the row is gone. The linked customer is pruned too when
-// the deleted submission was the only reason it existed.
 // handleDownload streams a submission's stored upload back to the operator,
 // named as the file the submitter originally attached. The stored path is
 // accepted only when it matches the generator's exact shape, so a corrupted
@@ -1793,6 +1798,10 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", fi.ModTime(), f)
 }
 
+// handleDeleteSubmission hard-deletes one submission (test entries, junk) —
+// unlike archiving, the row is gone. The linked customer is pruned too when
+// the deleted submission was the only reason it existed, and form-learned
+// tags nothing references anymore go with it.
 func (s *server) handleDeleteSubmission(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1836,6 +1845,11 @@ func (s *server) handleDeleteSubmission(w http.ResponseWriter, r *http.Request) 
 	if customerID.Valid {
 		if err := pruneOrphanCustomers(r.Context(), tx, []int64{customerID.Int64}); err != nil {
 			log.Printf("delete submission customer prune error: %v", err)
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		if err := pruneOrphanFormTags(r.Context(), tx); err != nil {
+			log.Printf("delete submission tag prune error: %v", err)
 			http.Error(w, "server error", http.StatusInternalServerError)
 			return
 		}
